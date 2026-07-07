@@ -23,11 +23,29 @@ jobs:
           flutter-version: '3.22.x'
           channel: 'stable'
 
+      - name: Auto-Generate Clean Project Layout
+        run: |
+          # Back up your converter code file
+          cp lib/main.dart current_main.dart
+          cp pubspec.yaml current_pubspec.yaml
+          
+          # Delete the hand-made broken files safely
+          rm -rf android lib pubspec.yaml
+          
+          # Force Flutter to build a perfectly configured template project
+          flutter create --org com.example --project-name iso_to_ul_converter .
+          
+          # Inject your specific conversion logic back into the fresh app layout
+          cp current_main.dart lib/main.dart
+          
+          # Re-apply the required offline file picker settings
+          sed -i '/dependencies:/a \  file_picker: ^8.0.0' pubspec.yaml
+
       - name: Install Dependencies
         run: flutter pub get
 
       - name: Build APK
-        run: flutter build apk --release
+        run: flutter build apk --release --no-pub
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
