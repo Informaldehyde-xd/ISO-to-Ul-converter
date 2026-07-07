@@ -35,13 +35,12 @@ class _OplConverterPageState extends State<OplConverterPage> {
   String _name = "No ISO Loaded";
   bool _isIsoToUl = true; 
 
-  // Generates a standard 8-character Hex Hash from the Game Title (USBUtil Style)
   String _generateUlHashId(String title) {
     int hash = 5381;
     String cleanTitle = title.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
     for (int i = 0; i < cleanTitle.length; i++) {
       hash = ((hash << 5) + hash) + cleanTitle.codeUnitAt(i);
-      hash = hash & 0xFFFFFFFF; // Keep it 32-bit unsigned
+      hash = hash & 0xFFFFFFFF; 
     }
     return hash.toRadixString(16).toUpperCase().padLeft(8, '0');
   }
@@ -92,7 +91,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
     }
   }
 
-  // ISO -> UL Converter with Fixed Atomic Config Writer
   Future<void> _convertIsoToUl() async {
     FilePickerResult? res = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['iso']);
     if (res == null || res.files.single.path == null) return;
@@ -131,9 +129,9 @@ class _OplConverterPageState extends State<OplConverterPage> {
         final String partLabel = idx.toString().padLeft(2, '0');
         final File destFile = File('$out/$filePrefix.$partLabel');
         
-        if (await destFile.exists()) await destFile.delete();
-        
-        final RandomAccessFile writer = await destFile.open(mode: FileMode.writeOnlyAppend);
+        // FIX: Replaced delete() and writeOnlyAppend with writeOnly.
+        // This safely truncates/overwrites existing files without triggering Android deletion permissions.
+        final RandomAccessFile writer = await destFile.open(mode: FileMode.writeOnly);
         int currentPartBytesWritten = 0;
         
         while (currentPartBytesWritten < splitLimit && done < len) {
@@ -162,7 +160,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
       
       final Uint8List newGameEntryBytes = Uint8List(64);
       
-      // Bytes 0-31: Display Title
       String title = _name.toUpperCase();
       if (title.length > 32) title = title.substring(0, 32);
       List<int> titleBytes = title.codeUnits;
@@ -170,7 +167,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
         newGameEntryBytes[i] = i < titleBytes.length ? titleBytes[i] : 0x00;
       }
       
-      // Bytes 32-46: Core Search Prefix Mapping (ul.XXXXXXXX)
       String shortIdString = "ul.$hashId";
       List<int> idBytes = shortIdString.codeUnits;
       for (int i = 0; i < 15; i++) {
@@ -178,10 +174,9 @@ class _OplConverterPageState extends State<OplConverterPage> {
       }
       
       newGameEntryBytes[47] = idx; 
-      newGameEntryBytes[48] = (len > 734003200) ? 0x14 : 0x12; // 0x14 = DVD, 0x12 = CD
-      newGameEntryBytes[53] = 0x08; // USBExtreme verification flag
+      newGameEntryBytes[48] = (len > 734003200) ? 0x14 : 0x12; 
+      newGameEntryBytes[53] = 0x08; 
       
-      // Bytes 54-63: Game Serial mapping suffix
       List<int> gidBytes = gid.codeUnits;
       for (int i = 0; i < 10; i++) {
         if (54 + i < 64) {
@@ -189,22 +184,18 @@ class _OplConverterPageState extends State<OplConverterPage> {
         }
       }
       
-      // CRITICAL FIX: Safe, clean file validation check before byte insertion
+      // FIX: Single atomic append operation. Skips .exists() and .create() completely.
       final File cfgFile = File(cfgPath);
-      if (!await cfgFile.exists()) {
-        await cfgFile.create(recursive: true);
-      }
-      
-      // Uses atomic appended execution with hard drive flush sync
       await cfgFile.writeAsBytes(newGameEntryBytes, mode: FileMode.append, flush: true);
 
       setState(() { _pct = 1.0; _msg = "SUCCESS: CONFIG UPDATED! NEW GAME LINKED TO OPL MENU."; });
     } catch (e) { 
-      setState(() { _msg = "WRITE ERROR: CONFIG FILE EMULATION BLOCKED OR FULL."; _pct = 0.0; }); 
+      // FIX: Outputs the actual system exception to the screen instead of a generic message.
+      String errorMsg = e.toString().toUpperCase().replaceAll('\n', ' ');
+      setState(() { _msg = "ERROR: $errorMsg"; _pct = 0.0; }); 
     } finally { setState(() { _run = false; }); }
   }
 
-  // UL -> ISO Reassembler
   Future<void> _convertUlToIso() async {
     setState(() { _msg = "SELECT THE OPL FOLDER CONTAINING YOUR UL FILES..."; });
     String? srcDir = await FilePicker.platform.getDirectoryPath();
@@ -331,9 +322,9 @@ class _OplConverterPageState extends State<OplConverterPage> {
       for (var filePart in sequentialParts) { totalTargetSize += await filePart.length(); }
 
       File outputIso = File('$outDir/$cleanTitle.iso');
-      if (await outputIso.exists()) await outputIso.delete();
-
-      final RandomAccessFile isoWriter = await outputIso.open(mode: FileMode.writeOnlyAppend);
+      
+      // FIX: Truncating safely via writeOnly, preventing permission delete errors
+      final RandomAccessFile isoWriter = await outputIso.open(mode: FileMode.writeOnly);
       int integratedBytes = 0;
       const int ramBuffer = 4 * 1024 * 1024; 
 
@@ -368,7 +359,8 @@ class _OplConverterPageState extends State<OplConverterPage> {
 
       setState(() { _pct = 1.0; _msg = "SUCCESS: REBUILD COMPLETE! ISO EXPORTED TO FOLDER."; });
     } catch (e) {
-      setState(() { _msg = "WRITE ERROR: PIPELINE INTERRUPTED OR INSUFFICIENT MEMORY."; _pct = 0.0; });
+      String errorMsg = e.toString().toUpperCase().replaceAll('\n', ' ');
+      setState(() { _msg = "ERROR: $errorMsg"; _pct = 0.0; });
     } finally {
       setState(() { _run = false; });
     }
