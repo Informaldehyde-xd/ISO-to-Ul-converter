@@ -98,7 +98,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
       const int splitLimit = 1024 * 1024 * 1024; // 1 GB size limits
       const int ramBuffer = 4 * 1024 * 1024;     // Smooth 4MB cache stream
       
-      // Clean string generation to strict 32 chars matching USBUtil standard format
       String title = _name.toUpperCase();
       if (title.length > 32) title = title.substring(0, 32);
       title = title.padRight(32, ' ');
@@ -110,7 +109,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
       while (done < len) {
         final String partLabel = idx.toString().padLeft(2, '0');
         
-        // Exact USBUtil structure format format match
         final File destFile = File('$out/ul.$title.$gid.$partLabel');
         if (await destFile.exists()) await destFile.delete();
         
@@ -120,7 +118,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
         while (currentPartBytesWritten < splitLimit && done < len) {
           int remainingInPart = splitLimit - currentPartBytesWritten;
           int remainingInFile = len - done;
-          int bytesToRead = (remainingInPart < bufferSize) ? remainingInPart : bufferSize;
+          int bytesToRead = (remainingInPart < ramBuffer) ? remainingInPart : ramBuffer;
           if (remainingInFile < bytesToRead) bytesToRead = remainingInFile;
 
           final Uint8List buffer = await reader.read(bytesToRead);
@@ -139,31 +137,24 @@ class _OplConverterPageState extends State<OplConverterPage> {
       }
       await reader.close();
 
-      // Assemble matching 64-byte structural index segment block data array mapping
       setState(() { _msg = "COMPILING FILE MAP INDEX CARD FOR MENU UPGRADE..."; });
       final Uint8List newGameEntryBytes = Uint8List(64);
       final ByteData dv = ByteData.sublistView(newGameEntryBytes);
       
-      // Bytes 0-31: Game Title (Padded with Spaces)
       List<int> titleBytes = title.codeUnits;
       for (int i = 0; i < 32; i++) {
         newGameEntryBytes[i] = i < titleBytes.length ? titleBytes[i] : 0x20;
       }
       
-      // Bytes 32-46: Genuine Game ID string structure matching USBUtil (e.g. 'ul.SLUS_211.34')
       String fullIdString = "ul.$gid";
       List<int> idBytes = fullIdString.codeUnits;
       for (int i = 0; i < 15; i++) {
         newGameEntryBytes[32 + i] = i < idBytes.length ? idBytes[i] : 0x00;
       }
       
-      // Byte 47: Media byte flag setting (0x01 indicates DVD layout)
-      newGameEntryBytes[47] = 0x01;
-      
-      // Bytes 48-51: Total chunks parts count as integer block
+      newGameEntryBytes[47] = 0x01; // DVD Media Flag Fixed syntax allocation
       dv.setUint32(48, idx, Endian.little);
       
-      // Update config natively by appending data entries to target drive
       final File cfgFile = File(cfgPath);
       final RandomAccessFile cfgWriter = await cfgFile.open(mode: FileMode.writeOnlyAppend);
       await cfgWriter.writeFrom(newGameEntryBytes);
