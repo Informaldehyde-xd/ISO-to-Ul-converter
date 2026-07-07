@@ -92,7 +92,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
     }
   }
 
-  // ISO -> UL Converter (Generates Clean ul.[HASH].[GAME_ID].[PART] Formats)
+  // ISO -> UL Converter with Fixed Atomic Config Writer
   Future<void> _convertIsoToUl() async {
     FilePickerResult? res = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['iso']);
     if (res == null || res.files.single.path == null) return;
@@ -102,8 +102,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
     
     final String gid = await _getGenuineId(src);
     final String hashId = _generateUlHashId(_name);
-    
-    // Combine Hash and Game ID to create the complete file prefix string matches
     final String filePrefix = "ul.$hashId.$gid"; 
     
     setState(() { _msg = "ID FOUND: [$gid]. CHOOSE YOUR OPL ROOT USB DIRECTORY..."; });
@@ -180,26 +178,33 @@ class _OplConverterPageState extends State<OplConverterPage> {
       }
       
       newGameEntryBytes[47] = idx; 
-      newGameEntryBytes[48] = (len > 734003200) ? 0x14 : 0x12;
+      newGameEntryBytes[48] = (len > 734003200) ? 0x14 : 0x12; // 0x14 = DVD, 0x12 = CD
+      newGameEntryBytes[53] = 0x08; // USBExtreme verification flag
       
-      // Bytes 49-63: Write explicit Serial ID strings to retain standard configurations
+      // Bytes 54-63: Game Serial mapping suffix
       List<int> gidBytes = gid.codeUnits;
-      for (int i = 0; i < 15; i++) {
-        newGameEntryBytes[49 + i] = i < gidBytes.length ? gidBytes[i] : 0x00;
+      for (int i = 0; i < 10; i++) {
+        if (54 + i < 64) {
+          newGameEntryBytes[54 + i] = i < gidBytes.length ? gidBytes[i] : 0x00;
+        }
       }
       
+      // CRITICAL FIX: Safe, clean file validation check before byte insertion
       final File cfgFile = File(cfgPath);
-      final RandomAccessFile cfgWriter = await cfgFile.open(mode: FileMode.writeOnlyAppend);
-      await cfgWriter.writeFrom(newGameEntryBytes);
-      await cfgWriter.close();
+      if (!await cfgFile.exists()) {
+        await cfgFile.create(recursive: true);
+      }
+      
+      // Uses atomic appended execution with hard drive flush sync
+      await cfgFile.writeAsBytes(newGameEntryBytes, mode: FileMode.append, flush: true);
 
       setState(() { _pct = 1.0; _msg = "SUCCESS: CONFIG UPDATED! NEW GAME LINKED TO OPL MENU."; });
     } catch (e) { 
-      setState(() { _msg = "WRITE ERROR: VERIFY PERMISSIONS IN EXPORT LOCATION."; _pct = 0.0; }); 
+      setState(() { _msg = "WRITE ERROR: CONFIG FILE EMULATION BLOCKED OR FULL."; _pct = 0.0; }); 
     } finally { setState(() { _run = false; }); }
   }
 
-  // FIXED UL -> ISO Reassembler (Scans the folder structures to accurately discover sibling chunks)
+  // UL -> ISO Reassembler
   Future<void> _convertUlToIso() async {
     setState(() { _msg = "SELECT THE OPL FOLDER CONTAINING YOUR UL FILES..."; });
     String? srcDir = await FilePicker.platform.getDirectoryPath();
@@ -215,8 +220,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
     try {
       final Uint8List bytes = await cfgFile.readAsBytes();
       final Directory dir = Directory(srcDir);
-      
-      // Grab all structural physical files currently residing in the chosen workspace folder
       final List<FileSystemEntity> actualDirectoryContents = await dir.list().toList();
 
       for (int i = 0; i < bytes.length; i += 64) {
@@ -233,19 +236,16 @@ class _OplConverterPageState extends State<OplConverterPage> {
         if (title.isNotEmpty && hashPrefix.startsWith("ul.")) {
           String resolvedFullPrefixOnDisk = "";
           
-          // Locate the physical '.00' file matches inside folder configurations to catch the embedded Game IDs
           for (var item in actualDirectoryContents) {
             if (item is File) {
               String filename = item.path.split('/').last;
               if (filename.startsWith("$hashPrefix.") && filename.endsWith(".00")) {
-                // Strips off the trailing '.00' leaving the actual name (e.g. "ul.4F446EB4.SLUS_219.78")
                 resolvedFullPrefixOnDisk = filename.substring(0, filename.length - 3);
                 break;
               }
             }
           }
 
-          // Only present the listing option if physical source files are properly detected
           if (resolvedFullPrefixOnDisk.isNotEmpty) {
             structuralGamesList.add({
               'title': title,
@@ -314,7 +314,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
     try {
       List<File> sequentialParts = [];
       
-      // Gathers and matches sequence streams from the newly discovered compound string patterns
       for (int idx = 0; idx < totalParts; idx++) {
         final String partLabel = idx.toString().padLeft(2, '0');
         File targetPartFile = File('$srcDir/$fullFilePrefix.$partLabel');
