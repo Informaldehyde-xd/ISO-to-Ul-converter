@@ -38,12 +38,23 @@ class _OplConverterPageState extends State<OplConverterPage> {
     RandomAccessFile? r;
     try {
       r = await f.open(mode: FileMode.read);
+      final int len = await f.length();
+      
+      // Step 1: Scan primary ISO directory tracks (standard sector location)
       await r.setPosition(32768);
-      final String txt = latin1.decode(await r.read(65536), allowInvalid: true);
-      final m = RegExp(r'([A-Z]{4})_(\d{3})\.(\d{2})').firstMatch(txt);
-      if (m != null) return "${m.group(1)}_${m.group(2)}.${m.group(3)}";
+      String txt = latin1.decode(await r.read(65536), allowInvalid: true);
+      RegExp reg = RegExp(r'([A-Z]{4})_(\d{3})\.(\d{2})');
+      var match = reg.firstMatch(txt);
+      if (match != null) return "${match.group(1)}_${match.group(2)}.${match.group(3)}";
+
+      // Step 2: Deep scan incremental lookups if standard index failed
+      int checkSize = len > 5000000 ? 5000000 : len;
+      await r.setPosition(0);
+      txt = latin1.decode(await r.read(checkSize), allowInvalid: true);
+      match = reg.firstMatch(txt);
+      if (match != null) return "${match.group(1)}_${match.group(2)}.${match.group(3)}";
     } catch (_) {} finally { await r?.close(); }
-    return "SLUS_000.00";
+    return "SLUS_123.45"; // Smart template fallback if ID is non-standard
   }
 
   Future<void> _convert() async {
@@ -59,38 +70,68 @@ class _OplConverterPageState extends State<OplConverterPage> {
     String? out = await FilePicker.platform.getDirectoryPath();
     if (out == null) return;
 
-    setState(() { _run = true; _pct = 0.0; _msg = "OPENING ISO FILE TRACKS..."; });
+    setState(() { _run = true; _pct = 0.0; _msg = "PREPARING DISK ENGINE..."; });
+    
     try {
       final int len = await src.length();
-      const int limit = 1024 * 1024 * 1024;
+      const int splitSize = 1024 * 1024 * 1024; // 1 GB File Part Boundaries
+      const int bufferSize = 1024 * 1024;       // 1 MB Stream Buffer
+      
       String title = _name.substring(0, _name.length > 32 ? 32 : _name.length).padRight(32, ' ');
       
-      final RandomAccessFile ptr = await src.open(mode: FileMode.read);
-      int done = 0; int idx = 0;
+      final RandomAccessFile reader = await src.open(mode: FileMode.read);
+      int totalBytesRead = 0;
+      int currentPartIndex = 0;
 
-      while (done < len) {
-        final int rem = (done + limit > len) ? (len - done) : limit;
-        final String lbl = idx.toString().padLeft(2, '0');
-        await Future.delayed(const Duration(milliseconds: 10));
+      while (totalBytesRead < len) {
+        final String partLabel = currentPartIndex.toString().padLeft(2, '0');
+        final File destFile = File('$out/ul.$gid.$partLabel');
+        final RandomAccessFile writer = await destFile.open(mode: FileMode.write);
         
-        setState(() { _msg = "WRITING PART $lbl FOR GAME CODE: $gid"; _pct = done / len; });
-        final Uint8List chunk = await ptr.read(rem);
-        await File('$out/ul.$gid.$lbl').writeAsBytes(chunk, flush: true);
-        done += rem; idx++;
+        int currentPartBytesWritten = 0;
+        
+        // Stream inside a nested loop to feed chunks safely into Android storage memory
+        while (currentPartBytesWritten < splitSize && totalBytesRead < len) {
+          int remainingInPart = splitSize - currentPartBytesWritten;
+          int remainingInFile = len - totalBytesRead;
+          int bytesToRead = (remainingInPart < bufferSize) ? remainingInPart : bufferSize;
+          if (remainingInFile < bytesToRead) bytesToRead = remainingInFile;
+
+          final Uint8List buffer = await reader.read(bytesToRead);
+          await writer.writeFrom(buffer);
+
+          totalBytesRead += bytesToRead;
+          currentPartBytesWritten += bytesToRead;
+
+          // Throttle UI update so it refreshes smoothly without straining the interface
+          if (totalBytesRead % (10 * 1024 * 1024) == 0 || totalBytesRead == len) {
+            setState(() {
+              _msg = "WRITING PART $partLabel FOR GAME CODE: $gid";
+              _pct = totalBytesRead / len;
+            });
+            // Gives the phone's rendering processor a brief window to redraw the progress bar
+            await Future.delayed(const Duration(milliseconds: 1));
+          }
+        }
+        await writer.close();
+        currentPartIndex++;
       }
-      await ptr.close();
+      await reader.close();
 
       setState(() { _msg = "GENERATING OPL MASTER UL.CFG MAP..."; });
       final Uint8List cfg = Uint8List(64);
       final ByteData dv = ByteData.sublistView(cfg);
       cfg.setRange(0, 32, title.codeUnits);
       cfg.setRange(32, 32 + gid.codeUnits.length, gid.codeUnits);
-      dv.setUint32(48, idx, Endian.little);
+      dv.setUint32(48, currentPartIndex, Endian.little);
       await File('$out/ul.cfg').writeAsBytes(cfg, flush: true);
 
       setState(() { _pct = 1.0; _msg = "SUCCESS: ALL CHUNKS GENERATED SAFELY!"; });
-    } catch (e) { setState(() { _msg = "WRITE ERROR: ${e.toString().toUpperCase()}"; _pct = 0.0; }); }
-    finally { setState(() { _run = false; }); }
+    } catch (e) { 
+      setState(() { _msg = "WRITE ERROR: ${e.toString().toUpperCase()}"; _pct = 0.0; }); 
+    } finally { 
+      setState(() { _run = false; }); 
+    }
   }
 
   @override
