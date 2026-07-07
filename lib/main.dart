@@ -129,9 +129,13 @@ class _OplConverterPageState extends State<OplConverterPage> {
         final String partLabel = idx.toString().padLeft(2, '0');
         final File destFile = File('$out/$filePrefix.$partLabel');
         
-        // FIX: Replaced delete() and writeOnlyAppend with writeOnly.
-        // This safely truncates/overwrites existing files without triggering Android deletion permissions.
-        final RandomAccessFile writer = await destFile.open(mode: FileMode.writeOnly);
+        // FIX: Ensure the file registry structure exists on Android storage
+        if (!await destFile.exists()) {
+          await destFile.create(recursive: true);
+        }
+        
+        // FIX: Using standard FileMode.write to auto-truncate safely without calling delete()
+        final RandomAccessFile writer = await destFile.open(mode: FileMode.write);
         int currentPartBytesWritten = 0;
         
         while (currentPartBytesWritten < splitLimit && done < len) {
@@ -184,13 +188,16 @@ class _OplConverterPageState extends State<OplConverterPage> {
         }
       }
       
-      // FIX: Single atomic append operation. Skips .exists() and .create() completely.
+      // FIX: Seamless atomic entry handling for existing/new configuration streams
       final File cfgFile = File(cfgPath);
-      await cfgFile.writeAsBytes(newGameEntryBytes, mode: FileMode.append, flush: true);
+      if (!await cfgFile.exists()) {
+        await cfgFile.writeAsBytes(newGameEntryBytes, flush: true);
+      } else {
+        await cfgFile.writeAsBytes(newGameEntryBytes, mode: FileMode.append, flush: true);
+      }
 
       setState(() { _pct = 1.0; _msg = "SUCCESS: CONFIG UPDATED! NEW GAME LINKED TO OPL MENU."; });
     } catch (e) { 
-      // FIX: Outputs the actual system exception to the screen instead of a generic message.
       String errorMsg = e.toString().toUpperCase().replaceAll('\n', ' ');
       setState(() { _msg = "ERROR: $errorMsg"; _pct = 0.0; }); 
     } finally { setState(() { _run = false; }); }
@@ -322,9 +329,11 @@ class _OplConverterPageState extends State<OplConverterPage> {
       for (var filePart in sequentialParts) { totalTargetSize += await filePart.length(); }
 
       File outputIso = File('$outDir/$cleanTitle.iso');
+      if (!await outputIso.exists()) {
+        await outputIso.create(recursive: true);
+      }
       
-      // FIX: Truncating safely via writeOnly, preventing permission delete errors
-      final RandomAccessFile isoWriter = await outputIso.open(mode: FileMode.writeOnly);
+      final RandomAccessFile isoWriter = await outputIso.open(mode: FileMode.write);
       int integratedBytes = 0;
       const int ramBuffer = 4 * 1024 * 1024; 
 
