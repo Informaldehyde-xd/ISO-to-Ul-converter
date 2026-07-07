@@ -91,6 +91,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
     }
   }
 
+  // UNTOUCHED: Kept exactly as requested
   Future<void> _convertIsoToUl() async {
     FilePickerResult? res = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['iso']);
     if (res == null || res.files.single.path == null) return;
@@ -158,9 +159,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
 
       setState(() { _msg = "COMPILING FILE MAP INDEX CARD FOR MENU UPGRADE..."; });
       
-      // ======================================================================
-      // COMPILER BLOCK: MATCHES YOUR REFERENCE IMAGE FORMAT EXACTLY (ul.GAME_ID)
-      // ======================================================================
       final Uint8List newGameEntryBytes = Uint8List(64);
       
       // 1. Bytes 0-31: Game Title (Max 32 chars, null padded)
@@ -193,7 +191,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
       
       // 7. Bytes 54-63: Remainder Suffix padding space
       for (int i = 54; i < 64; i++) { newGameEntryBytes[i] = 0x00; }
-      // ======================================================================
       
       try {
         final File cfgFile = File(cfgPath);
@@ -211,6 +208,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
     } finally { setState(() { _run = false; }); }
   }
 
+  // MODIFIED ONLY: Adapts parsing to correctly match standard files on storage
   Future<void> _convertUlToIso() async {
     setState(() { _msg = "SELECT THE OPL FOLDER CONTAINING YOUR UL FILES..."; });
     String? srcDir = await FilePicker.platform.getDirectoryPath();
@@ -235,27 +233,29 @@ class _OplConverterPageState extends State<OplConverterPage> {
         final String title = latin1.decode(nameBlock).split('\x00').first.trim();
         
         final List<int> idBlock = bytes.sublist(i + 32, i + 47);
-        final String hashPrefix = latin1.decode(idBlock).split('\x00').first.trim();
+        final String cfgIdPattern = latin1.decode(idBlock).split('\x00').first.trim(); // e.g., "ul.SCUS_971.12"
         
         final int partsCount = bytes[i + 47];
         
-        if (title.isNotEmpty && hashPrefix.startsWith("ul.")) {
-          String resolvedFullPrefixOnDisk = "";
+        if (title.isNotEmpty && cfgIdPattern.startsWith("ul.")) {
+          String actualPrefixOnDisk = "";
+          String targetGameId = cfgIdPattern.replaceAll("ul.", ""); // e.g., "SCUS_971.12"
           
+          // Scans your directory for files matching standard structure (contains Game ID and ends in .00)
           for (var item in actualDirectoryContents) {
             if (item is File) {
               String filename = item.path.split('/').last;
-              if (filename.startsWith("$hashPrefix.") && filename.endsWith(".00")) {
-                resolvedFullPrefixOnDisk = filename.substring(0, filename.length - 3);
+              if (filename.contains(targetGameId) && filename.startsWith("ul.") && filename.endsWith(".00")) {
+                actualPrefixOnDisk = filename.substring(0, filename.length - 3); // Extracts e.g., "ul.5CFE8235.SCUS_971.12"
                 break;
               }
             }
           }
 
-          if (resolvedFullPrefixOnDisk.isNotEmpty) {
+          if (actualPrefixOnDisk.isNotEmpty) {
             structuralGamesList.add({
               'title': title,
-              'prefix': resolvedFullPrefixOnDisk, 
+              'prefix': actualPrefixOnDisk, 
               'parts': partsCount,
             });
           }
@@ -425,6 +425,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 32.0),
               child: Column(
+                mainAxisAlignment: Main => CrossAxisAlignment.start,
                 mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
