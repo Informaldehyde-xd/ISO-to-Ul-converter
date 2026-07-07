@@ -1,50 +1,49 @@
-import 'dart:io';
-import 'dart:typed_data';
-import 'package:flutter/material.dart';
-import 'package:file_picker/file_picker.dart';
-
-void main() {
-  runApp(const MyApp());
-}
-
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'OPL ISO Utility',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF0F141D), 
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFF161E2E),
-          elevation: 4,
-          titleTextStyle: TextStyle(
-            color: Color(0xFF4C9EFF), 
-            fontSize: 18,
-            fontWeight: FontWeight.bold,
-            letterSpacing: 1.2,
-          ),
-        ),
-      ),
-      home: const OplConverterPage(),
-    );
-  }
-}
-
-class OplConverterPage extends StatefulWidget {
-  const OplConverterPage({super.key});
-
-  @override
-  State<OplConverterPage> createState() => _OplConverterPageState();
-}
-
 class _OplConverterPageState extends State<OplConverterPage> {
   String _statusMessage = "READY: CHOOSE AN ISO GAME FILE TO SPLIT";
   bool _isConverting = false;
   double _progressValue = 0.0;
   String _selectedGameName = "No ISO Loaded";
+
+  // Scans the ISO sectors to parse the true embedded SYSTEM.CNF configuration
+  Future<String> _extractGenuineGameId(File file) async {
+    RandomAccessFile? raf;
+    try {
+      raf = await file.open(mode: FileMode.read);
+      // PS2 ISO primary volume descriptors begin scanning around Sector 16 (32768 bytes)
+      await raf.setPosition(32768);
+      final Uint8List buffer = await raf.read(64 * 1024); // 64KB scan window
+      final String rawText = latin1.decode(buffer, allowInvalid: true);
+      
+      final RegExp regExp = RegExp(r'([A-Z]{4})_(\d{3})\.(\d{2})');
+      final match = regExp.firstMatch(rawText);
+      
+      if (match != null) {
+        String prefix = match.group(1)!;
+        String num1 = match.group(2)!;
+        String num2 = match.group(3)!;
+        return "${prefix}_$num1.$num2"; // Yields exact genuine ID e.g., SLUS_216.05
+      }
+    } catch (_) {
+      // Fallback sector scan if primary volume descriptor is modified
+      try {
+        if (raf != null) {
+          await raf.setPosition(0);
+          final Uint8List smallBuffer = await raf.read(256 * 1024); // Scan first 256KB
+          final String altText = latin1.decode(smallBuffer, allowInvalid: true);
+          final RegExp altRegExp = RegExp(r'([A-Z]{4})_(\d{3})\.(\d{2})');
+          final altMatch = altRegExp.firstMatch(altText);
+          if (altMatch != null) {
+            return "${altMatch.group(1)}_${altMatch.group(2)}.${altMatch.group(3)}";
+          }
+        }
+      } catch (_) {}
+    } finally {
+      if (raf != null) {
+        await raf.close();
+      }
+    }
+    return "SLUS_000.00"; // Safeguard fallback if disk descriptor header is entirely custom
+  }
 
   Future<void> _processIsoWithTracking() async {
     // 1. Pick the Input ISO File
@@ -58,18 +57,23 @@ class _OplConverterPageState extends State<OplConverterPage> {
       return;
     }
 
-    final String isoPath = result.files.single.path!;
-    final File sourceIso = File(isoPath);
+    final File sourceIso = File(result.files.single.path!);
     final String baseName = result.files.single.name.replaceAll('.iso', '');
 
     setState(() {
       _selectedGameName = baseName;
-      _statusMessage = "CHOOSE WHERE TO SAVE THE CONVERTED UL FILES...";
+      _statusMessage = "SCANNING DISK TRACKS FOR GENUINE GAME ID...";
     });
 
-    // 2. Select Output Folder to Bypass Storage Permissions Safely
-    String? targetDirectory = await FilePicker.platform.getDirectoryPath();
+    // 2. Read the genuine identifier string directly from the file bytes
+    final String genuineId = await _extractGenuineGameId(sourceIso);
 
+    setState(() {
+      _statusMessage = "GAME FOUND ID [$genuineId]. SELECT OUTPUT DESTINATION...";
+    });
+
+    // 3. Select Output Folder to Bypass Storage Restrictions
+    String? targetDirectory = await FilePicker.platform.getDirectoryPath();
     if (targetDirectory == null) {
       setState(() { _statusMessage = "ERROR: OUTPUT FOLDER NOT SELECTED"; });
       return;
@@ -78,51 +82,49 @@ class _OplConverterPageState extends State<OplConverterPage> {
     setState(() {
       _isConverting = true;
       _progressValue = 0.0;
-      _statusMessage = "OPENING ISO FILE SEGMENTS...";
+      _statusMessage = "OPENING ISO FILE ENGINES...";
     });
 
     try {
       final int totalFileBytes = await sourceIso.length();
-      const int targetChunkLimit = 1024 * 1024 * 1024; // 1 GB chunks
+      const int targetChunkLimit = 1024 * 1024 * 1024; // Standard 1 GB split boundary
       
       String formattedGameTitle = baseName;
       if (formattedGameTitle.length > 32) formattedGameTitle = formattedGameTitle.substring(0, 32);
       formattedGameTitle = formattedGameTitle.padRight(32, ' ');
       
-      // Default PS2 System identifier template string
-      const String operationalId = "SLUS_123.45"; 
-      
       final RandomAccessFile filePointer = await sourceIso.open(mode: FileMode.read);
       int bytesProcessed = 0;
       int sliceIndex = 0;
 
-      // Real File Splitting Data Loop Execution Engine
+      // 4. Optimized Asynchronous Streaming File Loop Engine to prevent UI Freezing
       while (bytesProcessed < totalFileBytes) {
         final int batchRemainder = (bytesProcessed + targetChunkLimit > totalFileBytes) 
             ? (totalFileBytes - bytesProcessed) 
             : targetChunkLimit;
 
         final String sequentialLabel = sliceIndex.toString().padLeft(2, '0');
+        
+        // Micro-yield execution to the UI main thread to let the progress bar update instantly
+        await Future.delayed(const Duration(milliseconds: 10));
+        
         setState(() {
-          _statusMessage = "WRITING REAL STORAGE FILE: ul.$operationalId.$sequentialLabel";
+          _statusMessage = "PROCESSING: WRITING PART $sequentialLabel FOR ID: $genuineId";
+          _progressValue = bytesProcessed / totalFileBytes;
         });
 
-        // Binary buffer extraction logic
+        // Binary extraction streaming segment updates directly to storage target path
         final Uint8List dataSegment = await filePointer.read(batchRemainder);
-        final File segmentOutput = File('$targetDirectory/ul.$operationalId.$sequentialLabel');
+        final File segmentOutput = File('$targetDirectory/ul.$genuineId.$sequentialLabel');
         await segmentOutput.writeAsBytes(dataSegment, flush: true);
 
         bytesProcessed += batchRemainder;
         sliceIndex++;
-
-        setState(() {
-          _progressValue = bytesProcessed / totalFileBytes;
-        });
       }
       await filePointer.close();
 
-      // Write matching ul.cfg config descriptor binary block
-      setState(() { _statusMessage = "GENERATING OPL COMPATIBLE UL.CFG CONFIG FILE..."; });
+      // 5. Generate the structural matching index configuration file (ul.cfg)
+      setState(() { _statusMessage = "COMPILING UL.CFG BINARY INDEX TABLE..."; });
       
       final Uint8List descriptorMapBytes = Uint8List(64);
       final ByteData structuredView = ByteData.sublistView(descriptorMapBytes);
@@ -132,7 +134,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
         descriptorMapBytes[i] = i < processedTitleAscii.length ? processedTitleAscii[i] : 32;
       }
 
-      final List<int> processedIdAscii = operationalId.codeUnits;
+      final List<int> processedIdAscii = genuineId.codeUnits;
       for (int i = 0; i < 15; i++) {
         descriptorMapBytes[32 + i] = i < processedIdAscii.length ? processedIdAscii[i] : 0;
       }
@@ -144,16 +146,15 @@ class _OplConverterPageState extends State<OplConverterPage> {
 
       setState(() {
         _progressValue = 1.0;
-        _statusMessage = "SUCCESS: ALL CHUNKS AND UL.CFG CREATED IN OUTPUT FOLDER!";
+        _statusMessage = "SUCCESS: ALL CHUNKS AND UL.CFG GENERATED SAFELY!";
       });
     } catch (failureTrace) {
       setState(() {
-        _statusMessage = "FATAL WRITE EXCEPTION: ${failureTrace.toString().toUpperCase()}";
+        _statusMessage = "WRITE ERROR: ${failureTrace.toString().toUpperCase()}";
+        _progressValue = 0.0;
       });
     } finally {
-      setState(() {
-        _isConverting = false;
-      });
+      setState(() { _isConverting = false; });
     }
   }
 
@@ -182,7 +183,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      "SELECTED TARGET COMPONENT:",
+                      "CURRENT LOADED GAME COMPONENT:",
                       style: TextStyle(color: Colors.grey, fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1.1),
                     ),
                     const SizedBox(height: 6),
@@ -226,7 +227,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
                 ),
               ),
             ),
-
             Container(
               color: const Color(0xFF111622),
               padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
@@ -237,7 +237,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
                     children: [
                       Icon(Icons.gamepad, color: Colors.grey, size: 16),
                       SizedBox(width: 6),
-                      Text("BDM USB GAMES", style: TextStyle(color: Colors.grey, fontSize: 11, fontWeight: FontWeight.bold)),
+                      Text("BDM USB LOADER", style: TextStyle(color: Colors.grey, fontSize: 11, fontWeight: FontWeight.bold)),
                     ],
                   ),
                   
@@ -264,3 +264,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
     );
   }
 }
+
+            
+              
