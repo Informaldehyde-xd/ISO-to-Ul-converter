@@ -1,10 +1,12 @@
 <manifest xmlns:android="http://android.com" package="com.example.iso_to_ul_converter">
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+    
     <application
         android:label="ISO Converter"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
+        
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -13,10 +15,11 @@
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize">
+            
             <meta-data
-              android:name="io.flutter.embedding.android.NormalTheme"
-              android:resource="@style/NormalTheme"
-              />
+              android:name="flutterEmbedding"
+              android:value="2" />
+              
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
