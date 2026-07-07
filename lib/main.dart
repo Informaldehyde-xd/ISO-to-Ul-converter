@@ -11,7 +11,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'OPL Utility',
+      title: 'OPL Library Utility',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF0F141D), 
@@ -27,7 +27,6 @@ class OplConverterPage extends StatefulWidget {
   @override
   State<OplConverterPage> createState() => _OplConverterPageState();
 }
-
 class _OplConverterPageState extends State<OplConverterPage> {
   String _msg = "READY: SELECT A PS2 ISO GAME FILE";
   bool _run = false;
@@ -56,42 +55,62 @@ class _OplConverterPageState extends State<OplConverterPage> {
     return "SLUS_202.40"; 
   }
 
+  Future<bool> _isGameAlreadyInstalled(String cfgPath, String gameId) async {
+    final File file = File(cfgPath);
+    if (!await file.exists()) return false;
+    try {
+      final Uint8List bytes = await file.readAsBytes();
+      if (bytes.length % 64 != 0) return false;
+      for (int i = 0; i < bytes.length; i += 64) {
+        final List<int> idBlock = bytes.sublist(i + 32, i + 47);
+        final String existingId = latin1.decode(idBlock).split('\x00').first.trim();
+        if (existingId == gameId.trim()) return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
   Future<void> _convert() async {
-    // 1. Select the original game disk file cleanly
     FilePickerResult? res = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['iso']);
     if (res == null || res.files.single.path == null) return;
     
     final File src = File(res.files.single.path!);
-    setState(() { _name = res.files.single.name.replaceAll('.iso', ''); _msg = "SCANNING TRACKS FOR GENUINE GAME ID..."; });
+    setState(() { _name = res.files.single.name.replaceAll('.iso', ''); _msg = "SCANNING DISK TRACKS FOR GENUINE ID..."; });
     
     final String gid = await _getGenuineId(src);
-    setState(() { _msg = "ID ASSIGNED: [$gid]. SELECT A VISIBLE EXPORT FOLDER..."; });
+    setState(() { _msg = "ID ASSIGNED: [$gid]. CHOOSE YOUR OPL ROOT USB DIRECTORY..."; });
     
-    // 2. Select visible storage destination directory safely via framework picker
     String? out = await FilePicker.platform.getDirectoryPath();
-    if (out == null) {
-      setState(() { _msg = "ERROR: EXPORT DESTINATION FOLDER CANCELED"; });
+    if (out == null) return;
+
+    final String cfgPath = '$out/ul.cfg';
+
+    if (await _isGameAlreadyInstalled(cfgPath, gid)) {
+      setState(() { _msg = "HALTED: GAME ID [$gid] IS ALREADY INSTALLED IN THIS UL.CFG MENU!"; });
       return;
     }
 
-    setState(() { _run = true; _pct = 0.0; _msg = "STREAMING SEGMENTS NATIVELY..."; });
+    setState(() { _run = true; _pct = 0.0; _msg = "INITIALIZING HIGH SPEED DATA STREAMS..."; });
     
     try {
       final int len = await src.length();
-      const int splitLimit = 1024 * 1024 * 1024; // 1 GB size boundaries
-      const int ramBuffer = 4 * 1024 * 1024;     // Smooth 4MB streaming engine data packets
+      const int splitLimit = 1024 * 1024 * 1024; // 1 GB size limits
+      const int ramBuffer = 4 * 1024 * 1024;     // Smooth 4MB cache stream
       
-      String title = _name.substring(0, _name.length > 32 ? 32 : _name.length).padRight(32, ' ');
+      // Clean string generation to strict 32 chars matching USBUtil standard format
+      String title = _name.toUpperCase();
+      if (title.length > 32) title = title.substring(0, 32);
+      title = title.padRight(32, ' ');
+      
       final RandomAccessFile reader = await src.open(mode: FileMode.read);
-      
       int done = 0; 
       int idx = 0;
 
       while (done < len) {
         final String partLabel = idx.toString().padLeft(2, '0');
         
-        // Write utilizing direct target paths verified by the storage permission layer
-        final File destFile = File('$out/ul.$gid.$partLabel');
+        // Match exact USBUtil format: ul.[32-char Display Name].[Game ID].[Part]
+        final File destFile = File('$out/ul.$title.$gid.$partLabel');
         if (await destFile.exists()) await destFile.delete();
         
         final RandomAccessFile writer = await destFile.open(mode: FileMode.writeOnlyAppend);
@@ -110,7 +129,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
           currentPartBytesWritten += bytesToRead;
 
           if (done % (16 * 1024 * 1024) == 0 || done == len) {
-            setState(() { _msg = "WRITING RAW FILE DATA: ul.$gid.$partLabel"; _pct = done / len; });
+            setState(() { _msg = "WRITING FILE: ul.$title.$gid.$partLabel"; _pct = done / len; });
             await Future.delayed(const Duration(milliseconds: 1)); 
           }
         }
@@ -119,21 +138,38 @@ class _OplConverterPageState extends State<OplConverterPage> {
       }
       await reader.close();
 
-      // 3. Output structural map index card (ul.cfg binary array descriptor layout)
-      setState(() { _msg = "CONSTRUCTING OPL ENGINE FILE INDEX REGISTRY..."; });
-      final Uint8List cfg = Uint8List(64);
-      final ByteData dv = ByteData.sublistView(cfg);
-      cfg.setRange(0, 32, title.codeUnits);
-      cfg.setRange(32, 32 + gid.codeUnits.length, gid.codeUnits);
+      // Assemble matching 64-byte structural index segment block data array mapping
+      setState(() { _msg = "COMPILING FILE MAP INDEX CARD FOR MENU UPGRADE..."; });
+      final Uint8List newGameEntryBytes = Uint8List(64);
+      final ByteData dv = ByteData.sublistView(newGameEntryBytes);
+      
+      // Byte mapping configuration constraints (0 to 31 for Name padded with 0x20)
+      List<int> titleBytes = title.codeUnits;
+      for (int i = 0; i < 32; i++) {
+        newGameEntryBytes[i] = i < titleBytes.length ? titleBytes[i] : 0x20;
+      }
+      
+      // Byte mapping configuration constraints (32 to 46 for ID padded with 0x00)
+      List<int> idBytes = gid.codeUnits;
+      for (int i = 0; i < 15; i++) {
+        newGameEntryBytes[32 + i] = i < idBytes.length ? idBytes[i] : 0x00;
+      }
+      
+      // Byte 47 specifies standard DVD media configuration flags (0x01)
+      newGameEntryBytes[47] = 0x01;
+      
+      // Bytes 48 to 51 write total chunk parts count count as integer block
       dv.setUint32(48, idx, Endian.little);
       
-      final File cfgFile = File('$out/ul.cfg');
-      if (await cfgFile.exists()) await cfgFile.delete();
-      await cfgFile.writeAsBytes(cfg, flush: true);
+      // Update config natively (Append configuration array entries)
+      final File cfgFile = File(cfgPath);
+      final RandomAccessFile cfgWriter = await cfgFile.open(mode: FileMode.writeOnlyAppend);
+      await cfgWriter.writeFrom(newGameEntryBytes);
+      await cfgWriter.close();
 
-      setState(() { _pct = 1.0; _msg = "SUCCESS: ALL CHUNKS AND UL.CFG GENERATED SUCCESSFULLY!"; });
+      setState(() { _pct = 1.0; _msg = "SUCCESS: CONFIG UPDATED! NEW GAME LINKED TO OPL MENU."; });
     } catch (e) { 
-      setState(() { _msg = "WRITE ERROR: CHOOSE MAIN 'DOWNLOADS' OR 'DOCUMENTS' COMPONENT FOLDER."; _pct = 0.0; }); 
+      setState(() { _msg = "WRITE ERROR: VERIFY PERMISSIONS IN EXPORT LOCATION."; _pct = 0.0; }); 
     } finally { setState(() { _run = false; }); }
   }
 
