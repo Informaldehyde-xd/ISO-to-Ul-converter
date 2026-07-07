@@ -35,7 +35,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
   String _name = "No ISO Loaded";
   bool _isIsoToUl = true; 
 
-  // Generates a standard 8-character Hex Hash from the Game Title (Ultimate USB / USBUtil Style)
+  // Generates a standard 8-character Hex Hash from the Game Title (USBUtil Style)
   String _generateUlHashId(String title) {
     int hash = 5381;
     String cleanTitle = title.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
@@ -92,7 +92,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
     }
   }
 
-  // ISO -> UL Converter (Generates Clean ul.XXXXXXXX.XX Standard Format)
+  // ISO -> UL Converter (Generates Clean ul.[HASH].[GAME_ID].[PART] Formats)
   Future<void> _convertIsoToUl() async {
     FilePickerResult? res = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['iso']);
     if (res == null || res.files.single.path == null) return;
@@ -103,7 +103,10 @@ class _OplConverterPageState extends State<OplConverterPage> {
     final String gid = await _getGenuineId(src);
     final String hashId = _generateUlHashId(_name);
     
-    setState(() { _msg = "HASH IDENTIFIED: [$hashId]. CHOOSE YOUR OPL ROOT USB DIRECTORY..."; });
+    // Combine Hash and Game ID to create the complete file prefix string matches
+    final String filePrefix = "ul.$hashId.$gid"; 
+    
+    setState(() { _msg = "ID FOUND: [$gid]. CHOOSE YOUR OPL ROOT USB DIRECTORY..."; });
     
     String? out = await FilePicker.platform.getDirectoryPath();
     if (out == null) return;
@@ -128,7 +131,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
 
       while (done < len) {
         final String partLabel = idx.toString().padLeft(2, '0');
-        final File destFile = File('$out/ul.$hashId.$partLabel');
+        final File destFile = File('$out/$filePrefix.$partLabel');
         
         if (await destFile.exists()) await destFile.delete();
         
@@ -148,7 +151,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
           currentPartBytesWritten += bytesToRead;
 
           if (done % (16 * 1024 * 1024) == 0 || done == len) {
-            setState(() { _msg = "WRITING: ul.$hashId.$partLabel"; _pct = done / len; });
+            setState(() { _msg = "WRITING: $filePrefix.$partLabel"; _pct = done / len; });
             await Future.delayed(const Duration(milliseconds: 1)); 
           }
         }
@@ -161,6 +164,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
       
       final Uint8List newGameEntryBytes = Uint8List(64);
       
+      // Bytes 0-31: Display Title
       String title = _name.toUpperCase();
       if (title.length > 32) title = title.substring(0, 32);
       List<int> titleBytes = title.codeUnits;
@@ -168,15 +172,21 @@ class _OplConverterPageState extends State<OplConverterPage> {
         newGameEntryBytes[i] = i < titleBytes.length ? titleBytes[i] : 0x00;
       }
       
-      String fullIdString = "ul.$hashId";
-      List<int> idBytes = fullIdString.codeUnits;
+      // Bytes 32-46: Core Search Prefix Mapping (ul.XXXXXXXX)
+      String shortIdString = "ul.$hashId";
+      List<int> idBytes = shortIdString.codeUnits;
       for (int i = 0; i < 15; i++) {
         newGameEntryBytes[32 + i] = i < idBytes.length ? idBytes[i] : 0x00;
       }
       
       newGameEntryBytes[47] = idx; 
       newGameEntryBytes[48] = (len > 734003200) ? 0x14 : 0x12;
-      newGameEntryBytes[53] = 0x08;
+      
+      // Bytes 49-63: Write explicit Serial ID strings to retain standard configurations
+      List<int> gidBytes = gid.codeUnits;
+      for (int i = 0; i < 15; i++) {
+        newGameEntryBytes[49 + i] = i < gidBytes.length ? gidBytes[i] : 0x00;
+      }
       
       final File cfgFile = File(cfgPath);
       final RandomAccessFile cfgWriter = await cfgFile.open(mode: FileMode.writeOnlyAppend);
@@ -189,7 +199,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
     } finally { setState(() { _run = false; }); }
   }
 
-  // Refactored UL -> ISO Reassembler (Scans Folder & Parses Config to find all chunks)
+  // FIXED UL -> ISO Reassembler (Scans the folder structures to accurately discover sibling chunks)
   Future<void> _convertUlToIso() async {
     setState(() { _msg = "SELECT THE OPL FOLDER CONTAINING YOUR UL FILES..."; });
     String? srcDir = await FilePicker.platform.getDirectoryPath();
@@ -201,10 +211,14 @@ class _OplConverterPageState extends State<OplConverterPage> {
       return;
     }
 
-    // Read and Parse ul.cfg entries to generate game selection listing
     List<Map<String, dynamic>> structuralGamesList = [];
     try {
       final Uint8List bytes = await cfgFile.readAsBytes();
+      final Directory dir = Directory(srcDir);
+      
+      // Grab all structural physical files currently residing in the chosen workspace folder
+      final List<FileSystemEntity> actualDirectoryContents = await dir.list().toList();
+
       for (int i = 0; i < bytes.length; i += 64) {
         if (i + 64 > bytes.length) break;
         
@@ -212,26 +226,42 @@ class _OplConverterPageState extends State<OplConverterPage> {
         final String title = latin1.decode(nameBlock).split('\x00').first.trim();
         
         final List<int> idBlock = bytes.sublist(i + 32, i + 47);
-        final String prefix = latin1.decode(idBlock).split('\x00').first.trim();
+        final String hashPrefix = latin1.decode(idBlock).split('\x00').first.trim();
         
         final int partsCount = bytes[i + 47];
         
-        if (title.isNotEmpty && prefix.startsWith("ul.")) {
-          structuralGamesList.add({
-            'title': title,
-            'prefix': prefix, 
-            'parts': partsCount,
-          });
+        if (title.isNotEmpty && hashPrefix.startsWith("ul.")) {
+          String resolvedFullPrefixOnDisk = "";
+          
+          // Locate the physical '.00' file matches inside folder configurations to catch the embedded Game IDs
+          for (var item in actualDirectoryContents) {
+            if (item is File) {
+              String filename = item.path.split('/').last;
+              if (filename.startsWith("$hashPrefix.") && filename.endsWith(".00")) {
+                // Strips off the trailing '.00' leaving the actual name (e.g. "ul.4F446EB4.SLUS_219.78")
+                resolvedFullPrefixOnDisk = filename.substring(0, filename.length - 3);
+                break;
+              }
+            }
+          }
+
+          // Only present the listing option if physical source files are properly detected
+          if (resolvedFullPrefixOnDisk.isNotEmpty) {
+            structuralGamesList.add({
+              'title': title,
+              'prefix': resolvedFullPrefixOnDisk, 
+              'parts': partsCount,
+            });
+          }
         }
       }
     } catch (_) {}
 
     if (structuralGamesList.isEmpty) {
-      setState(() { _msg = "HALTED: NO VALID GAMES RECOGNIZED INSIDE FILE MENU."; });
+      setState(() { _msg = "HALTED: NO MATCHING UL SPLIT FILES RECOGNIZED IN THIS FOLDER."; });
       return;
     }
 
-    // Material Dialog selection window matching layout parameters
     Map<String, dynamic>? chosenGame = await showDialog<Map<String, dynamic>>(
       context: context,
       barrierDismissible: false,
@@ -268,12 +298,12 @@ class _OplConverterPageState extends State<OplConverterPage> {
     }
 
     String cleanTitle = chosenGame['title'];
-    String filePrefix = chosenGame['prefix']; 
+    String fullFilePrefix = chosenGame['prefix']; 
     int totalParts = chosenGame['parts'];
 
     setState(() { 
       _name = cleanTitle; 
-      _msg = "GAME SELECTED. SELECT THE OUTPUT FOLDER FOR THE RESTORED ISO..."; 
+      _msg = "GAME MATCHED. SELECT THE OUTPUT FOLDER FOR THE RESTORED ISO..."; 
     });
 
     String? outDir = await FilePicker.platform.getDirectoryPath();
@@ -284,15 +314,15 @@ class _OplConverterPageState extends State<OplConverterPage> {
     try {
       List<File> sequentialParts = [];
       
-      // Verify all sequential pieces exist in the directory path
+      // Gathers and matches sequence streams from the newly discovered compound string patterns
       for (int idx = 0; idx < totalParts; idx++) {
         final String partLabel = idx.toString().padLeft(2, '0');
-        File targetPartFile = File('$srcDir/$filePrefix.$partLabel');
+        File targetPartFile = File('$srcDir/$fullFilePrefix.$partLabel');
         
         if (await targetPartFile.exists()) {
           sequentialParts.add(targetPartFile);
         } else {
-          setState(() { _msg = "HALTED: MISSING SPLIT FILE: $filePrefix.$partLabel"; });
+          setState(() { _msg = "HALTED: MISSING CHUNK: $fullFilePrefix.$partLabel"; });
           _run = false;
           return;
         }
