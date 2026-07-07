@@ -57,23 +57,29 @@ class _OplConverterPageState extends State<OplConverterPage> {
   }
 
   Future<void> _convert() async {
+    // 1. Select the original game disk file cleanly
     FilePickerResult? res = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['iso']);
     if (res == null || res.files.single.path == null) return;
     
     final File src = File(res.files.single.path!);
-    setState(() { _name = res.files.single.name.replaceAll('.iso', ''); _msg = "SCANNING DISK TRACKS FOR GENUINE ID..."; });
+    setState(() { _name = res.files.single.name.replaceAll('.iso', ''); _msg = "SCANNING TRACKS FOR GENUINE GAME ID..."; });
     
     final String gid = await _getGenuineId(src);
+    setState(() { _msg = "ID ASSIGNED: [$gid]. SELECT A VISIBLE EXPORT FOLDER..."; });
     
-    // Bypasses Android security blocks by initializing output inside app cache space
-    final String out = src.parent.path; 
+    // 2. Select visible storage destination directory safely via framework picker
+    String? out = await FilePicker.platform.getDirectoryPath();
+    if (out == null) {
+      setState(() { _msg = "ERROR: EXPORT DESTINATION FOLDER CANCELED"; });
+      return;
+    }
 
-    setState(() { _run = true; _pct = 0.0; _msg = "PROCESSING STREAMS..."; });
+    setState(() { _run = true; _pct = 0.0; _msg = "STREAMING SEGMENTS NATIVELY..."; });
     
     try {
       final int len = await src.length();
-      const int splitLimit = 1024 * 1024 * 1024; 
-      const int ramBuffer = 4 * 1024 * 1024;     
+      const int splitLimit = 1024 * 1024 * 1024; // 1 GB size boundaries
+      const int ramBuffer = 4 * 1024 * 1024;     // Smooth 4MB streaming engine data packets
       
       String title = _name.substring(0, _name.length > 32 ? 32 : _name.length).padRight(32, ' ');
       final RandomAccessFile reader = await src.open(mode: FileMode.read);
@@ -83,8 +89,9 @@ class _OplConverterPageState extends State<OplConverterPage> {
 
       while (done < len) {
         final String partLabel = idx.toString().padLeft(2, '0');
-        final File destFile = File('$out/ul.$gid.$partLabel');
         
+        // Write utilizing direct target paths verified by the storage permission layer
+        final File destFile = File('$out/ul.$gid.$partLabel');
         if (await destFile.exists()) await destFile.delete();
         
         final RandomAccessFile writer = await destFile.open(mode: FileMode.writeOnlyAppend);
@@ -103,7 +110,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
           currentPartBytesWritten += bytesToRead;
 
           if (done % (16 * 1024 * 1024) == 0 || done == len) {
-            setState(() { _msg = "CREATING FILE: ul.$gid.$partLabel"; _pct = done / len; });
+            setState(() { _msg = "WRITING RAW FILE DATA: ul.$gid.$partLabel"; _pct = done / len; });
             await Future.delayed(const Duration(milliseconds: 1)); 
           }
         }
@@ -112,7 +119,8 @@ class _OplConverterPageState extends State<OplConverterPage> {
       }
       await reader.close();
 
-      setState(() { _msg = "GENERATING CONFIGURATION INDEX FILE..."; });
+      // 3. Output structural map index card (ul.cfg binary array descriptor layout)
+      setState(() { _msg = "CONSTRUCTING OPL ENGINE FILE INDEX REGISTRY..."; });
       final Uint8List cfg = Uint8List(64);
       final ByteData dv = ByteData.sublistView(cfg);
       cfg.setRange(0, 32, title.codeUnits);
@@ -123,9 +131,9 @@ class _OplConverterPageState extends State<OplConverterPage> {
       if (await cfgFile.exists()) await cfgFile.delete();
       await cfgFile.writeAsBytes(cfg, flush: true);
 
-      setState(() { _pct = 1.0; _msg = "SUCCESS! WRITTEN ADJACENT TO SOURCE ISO DIRECTORY."; });
+      setState(() { _pct = 1.0; _msg = "SUCCESS: ALL CHUNKS AND UL.CFG GENERATED SUCCESSFULLY!"; });
     } catch (e) { 
-      setState(() { _msg = "PROCESSING ERROR: ${e.toString().toUpperCase()}"; _pct = 0.0; }); 
+      setState(() { _msg = "WRITE ERROR: CHOOSE MAIN 'DOWNLOADS' OR 'DOCUMENTS' COMPONENT FOLDER."; _pct = 0.0; }); 
     } finally { setState(() { _run = false; }); }
   }
 
