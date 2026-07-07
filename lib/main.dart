@@ -33,6 +33,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
   bool _run = false;
   double _pct = 0.0;
   String _name = "No ISO Loaded";
+  bool _isIsoToUl = true; 
 
   Future<String> _getGenuineId(File f) async {
     RandomAccessFile? r;
@@ -62,16 +63,45 @@ class _OplConverterPageState extends State<OplConverterPage> {
     try {
       final Uint8List bytes = await file.readAsBytes();
       if (bytes.length % 64 != 0) return false;
+      String targetPrefix = "ul.$gameId".trim();
       for (int i = 0; i < bytes.length; i += 64) {
         final List<int> idBlock = bytes.sublist(i + 32, i + 47);
-        final String existingId = latin1.decode(idBlock).split('\x00').first.trim().replaceAll('ul.', '');
-        if (existingId == gameId.trim()) return true;
+        final String existingId = latin1.decode(idBlock).split('\x00').first.trim();
+        if (existingId == targetPrefix) return true;
       }
     } catch (_) {}
     return false;
   }
 
-  Future<void> _convert() async {
+  Future<String> _getGameTitleFromCfg(String cfgPath, String gameId) async {
+    final File file = File(cfgPath);
+    if (!await file.exists()) return "REASSEMBLED_GAME";
+    try {
+      final Uint8List bytes = await file.readAsBytes();
+      if (bytes.length % 64 != 0) return "REASSEMBLED_GAME";
+      String targetPrefix = "ul.$gameId".trim();
+      for (int i = 0; i < bytes.length; i += 64) {
+        final List<int> idBlock = bytes.sublist(i + 32, i + 47);
+        final String existingId = latin1.decode(idBlock).split('\x00').first.trim();
+        if (existingId == targetPrefix) {
+          final List<int> nameBlock = bytes.sublist(i, i + 32);
+          return latin1.decode(nameBlock).split('\x00').first.trim();
+        }
+      }
+    } catch (_) {}
+    return "REASSEMBLED_GAME";
+  }
+
+  void _startProcess() {
+    if (_isIsoToUl) {
+      _convertIsoToUl();
+    } else {
+      _convertUlToIso();
+    }
+  }
+
+  // Refactored ISO -> UL Converter (OPL Compatible Layout)
+  Future<void> _convertIsoToUl() async {
     FilePickerResult? res = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['iso']);
     if (res == null || res.files.single.path == null) return;
     
@@ -95,21 +125,18 @@ class _OplConverterPageState extends State<OplConverterPage> {
     
     try {
       final int len = await src.length();
-      const int splitLimit = 1024 * 1024 * 1024; // 1 GB size limits
-      const int ramBuffer = 4 * 1024 * 1024;     // Smooth 4MB cache stream
-      
-      String title = _name.toUpperCase();
-      if (title.length > 32) title = title.substring(0, 32);
-      title = title.padRight(32, ' ');
+      const int splitLimit = 1024 * 1024 * 1024; 
+      const int ramBuffer = 4 * 1024 * 1024;     
       
       final RandomAccessFile reader = await src.open(mode: FileMode.read);
       int done = 0; 
       int idx = 0;
 
+      // Write sequential files using the standardized matching layout prefix (ul.GAME_ID.Part)
       while (done < len) {
         final String partLabel = idx.toString().padLeft(2, '0');
+        final File destFile = File('$out/ul.$gid.$partLabel');
         
-        final File destFile = File('$out/ul.$title.$gid.$partLabel');
         if (await destFile.exists()) await destFile.delete();
         
         final RandomAccessFile writer = await destFile.open(mode: FileMode.writeOnlyAppend);
@@ -128,7 +155,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
           currentPartBytesWritten += bytesToRead;
 
           if (done % (16 * 1024 * 1024) == 0 || done == len) {
-            setState(() { _msg = "WRITING FILE: ul.$title.$gid.$partLabel"; _pct = done / len; });
+            setState(() { _msg = "WRITING SPLIT FILE: ul.$gid.$partLabel"; _pct = done / len; });
             await Future.delayed(const Duration(milliseconds: 1)); 
           }
         }
@@ -138,22 +165,33 @@ class _OplConverterPageState extends State<OplConverterPage> {
       await reader.close();
 
       setState(() { _msg = "COMPILING FILE MAP INDEX CARD FOR MENU UPGRADE..."; });
-      final Uint8List newGameEntryBytes = Uint8List(64);
-      final ByteData dv = ByteData.sublistView(newGameEntryBytes);
       
+      // Generate exact 64-Byte structure mapped to USBExtreme/OPL parameters
+      final Uint8List newGameEntryBytes = Uint8List(64);
+      
+      // 1. Display Name (Bytes 0-31): ASCII Null-Padded
+      String title = _name.toUpperCase();
+      if (title.length > 32) title = title.substring(0, 32);
       List<int> titleBytes = title.codeUnits;
       for (int i = 0; i < 32; i++) {
-        newGameEntryBytes[i] = i < titleBytes.length ? titleBytes[i] : 0x20;
+        newGameEntryBytes[i] = i < titleBytes.length ? titleBytes[i] : 0x00;
       }
       
+      // 2. File Target Prefix (Bytes 32-46): "ul.GAME_ID" Null-Padded
       String fullIdString = "ul.$gid";
       List<int> idBytes = fullIdString.codeUnits;
       for (int i = 0; i < 15; i++) {
         newGameEntryBytes[32 + i] = i < idBytes.length ? idBytes[i] : 0x00;
       }
       
-      newGameEntryBytes[47] = 0x01; // DVD Media Flag Fixed syntax allocation
-      dv.setUint32(48, idx, Endian.little);
+      // 3. Number of total chunk segments (Byte 47)
+      newGameEntryBytes[47] = idx; 
+      
+      // 4. Media Allocation identifier flag (Byte 48): 0x12 = CD, 0x14 = DVD
+      newGameEntryBytes[48] = (len > 734003200) ? 0x14 : 0x12;
+      
+      // 5. USBExtreme Magic Identification signature (Byte 53)
+      newGameEntryBytes[53] = 0x08;
       
       final File cfgFile = File(cfgPath);
       final RandomAccessFile cfgWriter = await cfgFile.open(mode: FileMode.writeOnlyAppend);
@@ -166,12 +204,157 @@ class _OplConverterPageState extends State<OplConverterPage> {
     } finally { setState(() { _run = false; }); }
   }
 
+  // Refactored UL -> ISO Reassembler (Reads standard OPL filenames)
+  Future<void> _convertUlToIso() async {
+    FilePickerResult? res = await FilePicker.platform.pickFiles(type: FileType.any);
+    if (res == null || res.files.single.path == null) return;
+
+    final String selectedPath = res.files.single.path!;
+    final String fileName = res.files.single.name;
+
+    if (!fileName.startsWith("ul.")) {
+      setState(() { _msg = "HALTED: SELECTED FILE IS NOT A VALID OPL UL FILE!"; });
+      return;
+    }
+
+    int lastDot = fileName.lastIndexOf('.');
+    if (lastDot == -1 || lastDot < 3) {
+      setState(() { _msg = "HALTED: UNABLE TO DETECT SPLIT PART INDEX FORMAT."; });
+      return;
+    }
+
+    String baseName = fileName.substring(0, lastDot + 1); 
+    String srcDir = Directory(selectedPath).parent.path;
+
+    String gameId = "";
+    try {
+      gameId = fileName.substring(3, lastDot); 
+    } catch (_) {}
+
+    final String cfgPath = '$srcDir/ul.cfg';
+    setState(() { _msg = "SEARCHING INDEX FOR GAME METADATA..."; });
+    String cleanTitle = await _getGameTitleFromCfg(cfgPath, gameId);
+
+    setState(() { 
+      _name = cleanTitle; 
+      _msg = "TARGET MATCHED. CHOOSE EXPORT DIRECTORY FOR RECONSTRUCTED ISO..."; 
+    });
+
+    String? outDir = await FilePicker.platform.getDirectoryPath();
+    if (outDir == null) return;
+
+    setState(() { _run = true; _pct = 0.0; _msg = "MAPPING SEQUENTIAL FILES FROM STORAGE..."; });
+
+    try {
+      List<File> sequentialParts = [];
+      int idx = 0;
+      
+      while (true) {
+        String partLabel = idx.toString().padLeft(2, '0');
+        File targetPartFile = File('$srcDir/$baseName$partLabel');
+        if (await targetPartFile.exists()) {
+          sequentialParts.add(targetPartFile);
+          idx++;
+        } else {
+          break;
+        }
+      }
+
+      if (sequentialParts.isEmpty) {
+        setState(() { _msg = "HALTED: NO STRUCTURAL PART TRACKS ENCOUNTERED."; });
+        return;
+      }
+
+      int totalTargetSize = 0;
+      for (var filePart in sequentialParts) {
+        totalTargetSize += await filePart.length();
+      }
+
+      File outputIso = File('$outDir/$cleanTitle.iso');
+      if (await outputIso.exists()) await outputIso.delete();
+
+      final RandomAccessFile isoWriter = await outputIso.open(mode: FileMode.writeOnlyAppend);
+      int integratedBytes = 0;
+      const int ramBuffer = 4 * 1024 * 1024; 
+
+      for (int i = 0; i < sequentialParts.length; i++) {
+        File currentPart = sequentialParts[i];
+        String segmentName = currentPart.path.split('/').last;
+        final RandomAccessFile partReader = await currentPart.open(mode: FileMode.read);
+        int currentPartLength = await currentPart.length();
+        int bytesReadFromPart = 0;
+
+        while (bytesReadFromPart < currentPartLength) {
+          int structuralGap = currentPartLength - bytesReadFromPart;
+          int bytesToRead = (structuralGap < ramBuffer) ? structuralGap : ramBuffer;
+
+          final Uint8List intermediateCache = await partReader.read(bytesToRead);
+          await isoWriter.writeFrom(intermediateCache);
+
+          bytesReadFromPart += bytesToRead;
+          integratedBytes += bytesToRead;
+
+          if (integratedBytes % (16 * 1024 * 1024) == 0 || integratedBytes == totalTargetSize) {
+            setState(() { 
+              _msg = "REASSEMBLING IMAGE DATA: $segmentName"; 
+              _pct = integratedBytes / totalTargetSize; 
+            });
+            await Future.delayed(const Duration(milliseconds: 1));
+          }
+        }
+        await partReader.close();
+      }
+      await isoWriter.close();
+
+      setState(() { _pct = 1.0; _msg = "SUCCESS: REBUILD COMPLETE! ISO EXPORTED TO FOLDER."; });
+    } catch (e) {
+      setState(() { _msg = "WRITE ERROR: PIPELINE INTERRUPTED OR INSUFFICIENT MEMORY."; _pct = 0.0; });
+    } finally {
+      setState(() { _run = false; });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text("OPEN PS2 LOADER UTILITY"), centerTitle: true),
       body: Column(
         children: [
+          const SizedBox(height: 16),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              ChoiceChip(
+                label: const Text("ISO ➔ UL CONVERTER"),
+                selected: _isIsoToUl,
+                onSelected: _run ? null : (selected) {
+                  setState(() {
+                    _isIsoToUl = true;
+                    _name = "No ISO Loaded";
+                    _pct = 0.0;
+                    _msg = "READY: SELECT A PS2 ISO GAME FILE";
+                  });
+                },
+                selectedColor: const Color(0xFF4C9EFF),
+                labelStyle: TextStyle(color: _isIsoToUl ? Colors.black : Colors.white, fontWeight: FontWeight.bold, fontSize: 11),
+              ),
+              const SizedBox(width: 12),
+              ChoiceChip(
+                label: const Text("UL ➔ ISO REASSEMBLER"),
+                selected: !_isIsoToUl,
+                onSelected: _run ? null : (selected) {
+                  setState(() {
+                    _isIsoToUl = false;
+                    _name = "No UL Parts Loaded";
+                    _pct = 0.0;
+                    _msg = "READY: SELECT ANY SPLIT FILE EXTENSION (.00)";
+                  });
+                },
+                selectedColor: const Color(0xFF4C9EFF),
+                labelStyle: TextStyle(color: !_isIsoToUl ? Colors.black : Colors.white, fontWeight: FontWeight.bold, fontSize: 11),
+              ),
+            ],
+          ),
           Expanded(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 32.0),
@@ -179,7 +362,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text("CURRENT LOADED GAME:", style: TextStyle(color: Colors.grey, fontSize: 11, fontWeight: FontWeight.bold)),
+                  Text(_isIsoToUl ? "CURRENT LOADED GAME:" : "TARGET EXTRACTION NAME:", style: const TextStyle(color: Colors.grey, fontSize: 11, fontWeight: FontWeight.bold)),
                   const SizedBox(height: 6),
                   Text(_name.toUpperCase(), style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w500), overflow: TextOverflow.ellipsis),
                   const SizedBox(height: 40),
@@ -203,7 +386,8 @@ class _OplConverterPageState extends State<OplConverterPage> {
               children: [
                 const Row(children: [Icon(Icons.gamepad, color: Colors.grey, size: 16), SizedBox(width: 6), Text("BDM USB LOADER", style: TextStyle(color: Colors.grey, fontSize: 11, fontWeight: FontWeight.bold))]),
                 ElevatedButton.icon(
-                  onPressed: _run ? null : _convert, icon: const Icon(Icons.folder_open, size: 18), label: Text(_run ? "CONVERTING" : "START CONVERSION"),
+                  onPressed: _run ? null : _startProcess, icon: const Icon(Icons.folder_open, size: 18), 
+                  label: Text(_run ? "PROCESSING" : (_isIsoToUl ? "START CONVERSION" : "REASSEMBLE ISO")),
                   style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF4C9EFF), foregroundColor: Colors.black, disabledBackgroundColor: const Color(0xFF1E293B), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12)),
                 ),
               ],
