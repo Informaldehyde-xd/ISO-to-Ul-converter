@@ -27,6 +27,7 @@ class OplConverterPage extends StatefulWidget {
   @override
   State<OplConverterPage> createState() => _OplConverterPageState();
 }
+
 class _OplConverterPageState extends State<OplConverterPage> {
   String _msg = "READY: SELECT A PS2 ISO GAME FILE";
   bool _run = false;
@@ -63,7 +64,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
       if (bytes.length % 64 != 0) return false;
       for (int i = 0; i < bytes.length; i += 64) {
         final List<int> idBlock = bytes.sublist(i + 32, i + 47);
-        final String existingId = latin1.decode(idBlock).split('\x00').first.trim();
+        final String existingId = latin1.decode(idBlock).split('\x00').first.trim().replaceAll('ul.', '');
         if (existingId == gameId.trim()) return true;
       }
     } catch (_) {}
@@ -109,7 +110,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
       while (done < len) {
         final String partLabel = idx.toString().padLeft(2, '0');
         
-        // Match exact USBUtil format: ul.[32-char Display Name].[Game ID].[Part]
+        // Exact USBUtil structure format format match
         final File destFile = File('$out/ul.$title.$gid.$partLabel');
         if (await destFile.exists()) await destFile.delete();
         
@@ -119,7 +120,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
         while (currentPartBytesWritten < splitLimit && done < len) {
           int remainingInPart = splitLimit - currentPartBytesWritten;
           int remainingInFile = len - done;
-          int bytesToRead = (remainingInPart < ramBuffer) ? remainingInPart : ramBuffer;
+          int bytesToRead = (remainingInPart < bufferSize) ? remainingInPart : bufferSize;
           if (remainingInFile < bytesToRead) bytesToRead = remainingInFile;
 
           final Uint8List buffer = await reader.read(bytesToRead);
@@ -143,25 +144,26 @@ class _OplConverterPageState extends State<OplConverterPage> {
       final Uint8List newGameEntryBytes = Uint8List(64);
       final ByteData dv = ByteData.sublistView(newGameEntryBytes);
       
-      // Byte mapping configuration constraints (0 to 31 for Name padded with 0x20)
+      // Bytes 0-31: Game Title (Padded with Spaces)
       List<int> titleBytes = title.codeUnits;
       for (int i = 0; i < 32; i++) {
         newGameEntryBytes[i] = i < titleBytes.length ? titleBytes[i] : 0x20;
       }
       
-      // Byte mapping configuration constraints (32 to 46 for ID padded with 0x00)
-      List<int> idBytes = gid.codeUnits;
+      // Bytes 32-46: Genuine Game ID string structure matching USBUtil (e.g. 'ul.SLUS_211.34')
+      String fullIdString = "ul.$gid";
+      List<int> idBytes = fullIdString.codeUnits;
       for (int i = 0; i < 15; i++) {
         newGameEntryBytes[32 + i] = i < idBytes.length ? idBytes[i] : 0x00;
       }
       
-      // Byte 47 specifies standard DVD media configuration flags (0x01)
+      // Byte 47: Media byte flag setting (0x01 indicates DVD layout)
       newGameEntryBytes[47] = 0x01;
       
-      // Bytes 48 to 51 write total chunk parts count count as integer block
+      // Bytes 48-51: Total chunks parts count as integer block
       dv.setUint32(48, idx, Endian.little);
       
-      // Update config natively (Append configuration array entries)
+      // Update config natively by appending data entries to target drive
       final File cfgFile = File(cfgPath);
       final RandomAccessFile cfgWriter = await cfgFile.open(mode: FileMode.writeOnlyAppend);
       await cfgWriter.writeFrom(newGameEntryBytes);
