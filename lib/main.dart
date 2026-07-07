@@ -125,7 +125,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
       int done = 0; 
       int idx = 0;
 
-      // RESTORED: Your original game splitting loops that you confirmed worked perfectly
       while (done < len) {
         final String partLabel = idx.toString().padLeft(2, '0');
         final File destFile = File('$out/$filePrefix.$partLabel');
@@ -159,42 +158,49 @@ class _OplConverterPageState extends State<OplConverterPage> {
 
       setState(() { _msg = "COMPILING FILE MAP INDEX CARD FOR MENU UPGRADE..."; });
       
+      // ======================================================================
+      // COMPILER BLOCK: MATCHES YOUR REFERENCE IMAGE FORMAT EXACTLY (ul.GAME_ID)
+      // ======================================================================
       final Uint8List newGameEntryBytes = Uint8List(64);
       
+      // 1. Bytes 0-31: Game Title (Max 32 chars, null padded)
       String title = _name.toUpperCase();
       if (title.length > 32) title = title.substring(0, 32);
-      List<int> titleBytes = title.codeUnits;
+      List<int> titleBytes = latin1.encode(title);
       for (int i = 0; i < 32; i++) {
         newGameEntryBytes[i] = i < titleBytes.length ? titleBytes[i] : 0x00;
       }
       
-      String shortIdString = "ul.$hashId";
-      List<int> idBytes = shortIdString.codeUnits;
+      // 2. Bytes 32-46: Must be "ul." + Game ID (e.g., "ul.SLUS_211.34")
+      String configIdString = "ul.${gid.trim()}"; 
+      if (configIdString.length > 15) configIdString = configIdString.substring(0, 15);
+      List<int> idBytes = latin1.encode(configIdString);
       for (int i = 0; i < 15; i++) {
         newGameEntryBytes[32 + i] = i < idBytes.length ? idBytes[i] : 0x00;
       }
       
+      // 3. Byte 47: Total Parts Count
       newGameEntryBytes[47] = idx; 
+      
+      // 4. Byte 48: Disk Media Flag (0x14 = DVD, 0x12 = CD)
       newGameEntryBytes[48] = (len > 734003200) ? 0x14 : 0x12; 
+      
+      // 5. Bytes 49-52: Structural Null Padding
+      for (int i = 49; i <= 52; i++) { newGameEntryBytes[i] = 0x00; }
+      
+      // 6. Byte 53: USBUtil Verification Constant Anchor
       newGameEntryBytes[53] = 0x08; 
       
-      List<int> gidBytes = gid.codeUnits;
-      for (int i = 0; i < 10; i++) {
-        if (54 + i < 64) {
-          newGameEntryBytes[54 + i] = i < gidBytes.length ? gidBytes[i] : 0x00;
-        }
-      }
+      // 7. Bytes 54-63: Remainder Suffix padding space
+      for (int i = 54; i < 64; i++) { newGameEntryBytes[i] = 0x00; }
+      // ======================================================================
       
-      // CRITICAL FIXED SECTION: Atomic and fully isolated config entry writing
       try {
         final File cfgFile = File(cfgPath);
         if (!await cfgFile.exists()) {
-          // Explicitly register the entry within Android's local filesystem index first
           await cfgFile.create(recursive: true);
         }
-        // Write/Append using explicit flush synchronization to push data past OS cache
         await cfgFile.writeAsBytes(newGameEntryBytes, mode: FileMode.append, flush: true);
-        
         setState(() { _pct = 1.0; _msg = "SUCCESS: CONFIG UPDATED! NEW GAME LINKED TO OPL MENU."; });
       } catch (configError) {
         setState(() { _msg = "WRITE ERROR: GAME SPLIT OK, BUT UL.CFG WRITE PERMISSION DENIED."; _pct = 0.0; });
@@ -205,7 +211,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
     } finally { setState(() { _run = false; }); }
   }
 
-  // UL -> ISO Reassembler (Untouched original format)
   Future<void> _convertUlToIso() async {
     setState(() { _msg = "SELECT THE OPL FOLDER CONTAINING YOUR UL FILES..."; });
     String? srcDir = await FilePicker.platform.getDirectoryPath();
