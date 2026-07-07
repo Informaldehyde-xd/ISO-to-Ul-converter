@@ -425,7 +425,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 32.0),
               child: Column(
-                mainAxisAlignment: Main => CrossAxisAlignment.start,
                 mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
