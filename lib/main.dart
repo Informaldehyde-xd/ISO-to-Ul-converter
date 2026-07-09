@@ -161,7 +161,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
       
       final Uint8List newGameEntryBytes = Uint8List(64);
       
-      // 1. Bytes 0-31: Game Title (Max 32 chars, null padded)
       String title = _name.toUpperCase();
       if (title.length > 32) title = title.substring(0, 32);
       List<int> titleBytes = latin1.encode(title);
@@ -169,7 +168,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
         newGameEntryBytes[i] = i < titleBytes.length ? titleBytes[i] : 0x00;
       }
       
-      // 2. Bytes 32-46: Must be "ul." + Game ID (e.g., "ul.SLUS_211.34")
       String configIdString = "ul.${gid.trim()}"; 
       if (configIdString.length > 15) configIdString = configIdString.substring(0, 15);
       List<int> idBytes = latin1.encode(configIdString);
@@ -177,19 +175,11 @@ class _OplConverterPageState extends State<OplConverterPage> {
         newGameEntryBytes[32 + i] = i < idBytes.length ? idBytes[i] : 0x00;
       }
       
-      // 3. Byte 47: Total Parts Count
       newGameEntryBytes[47] = idx; 
-      
-      // 4. Byte 48: Disk Media Flag (0x14 = DVD, 0x12 = CD)
       newGameEntryBytes[48] = (len > 734003200) ? 0x14 : 0x12; 
       
-      // 5. Bytes 49-52: Structural Null Padding
       for (int i = 49; i <= 52; i++) { newGameEntryBytes[i] = 0x00; }
-      
-      // 6. Byte 53: USBUtil Verification Constant Anchor
       newGameEntryBytes[53] = 0x08; 
-      
-      // 7. Bytes 54-63: Remainder Suffix padding space
       for (int i = 54; i < 64; i++) { newGameEntryBytes[i] = 0x00; }
       
       try {
@@ -208,7 +198,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
     } finally { setState(() { _run = false; }); }
   }
 
-  // MODIFIED ONLY: Adapts parsing to correctly match standard files on storage
+  // UNTOUCHED: Kept exactly as requested
   Future<void> _convertUlToIso() async {
     setState(() { _msg = "SELECT THE OPL FOLDER CONTAINING YOUR UL FILES..."; });
     String? srcDir = await FilePicker.platform.getDirectoryPath();
@@ -233,20 +223,19 @@ class _OplConverterPageState extends State<OplConverterPage> {
         final String title = latin1.decode(nameBlock).split('\x00').first.trim();
         
         final List<int> idBlock = bytes.sublist(i + 32, i + 47);
-        final String cfgIdPattern = latin1.decode(idBlock).split('\x00').first.trim(); // e.g., "ul.SCUS_971.12"
+        final String cfgIdPattern = latin1.decode(idBlock).split('\x00').first.trim(); 
         
         final int partsCount = bytes[i + 47];
         
         if (title.isNotEmpty && cfgIdPattern.startsWith("ul.")) {
           String actualPrefixOnDisk = "";
-          String targetGameId = cfgIdPattern.replaceAll("ul.", ""); // e.g., "SCUS_971.12"
+          String targetGameId = cfgIdPattern.replaceAll("ul.", ""); 
           
-          // Scans your directory for files matching standard structure (contains Game ID and ends in .00)
           for (var item in actualDirectoryContents) {
             if (item is File) {
               String filename = item.path.split('/').last;
               if (filename.contains(targetGameId) && filename.startsWith("ul.") && filename.endsWith(".00")) {
-                actualPrefixOnDisk = filename.substring(0, filename.length - 3); // Extracts e.g., "ul.5CFE8235.SCUS_971.12"
+                actualPrefixOnDisk = filename.substring(0, filename.length - 3); 
                 break;
               }
             }
@@ -380,6 +369,107 @@ class _OplConverterPageState extends State<OplConverterPage> {
     }
   }
 
+  // NEW METHOD: Scans the folder and completely generates/rebuilds the ul.cfg structural file map
+  Future<void> _regenerateUlCfg() async {
+    setState(() { _msg = "SELECT OPL ROUTE DIRECTORY TO SCAN SPLIT CONVERTED GAME CHUNKS..."; });
+    String? targetFolder = await FilePicker.platform.getDirectoryPath();
+    if (targetFolder == null) return;
+
+    setState(() { _run = true; _pct = 0.0; _msg = "SCANNING DIRECTORY TREE ELEMENTS..."; });
+
+    try {
+      final Directory dir = Directory(targetFolder);
+      final List<FileSystemEntity> contentList = await dir.list().toList();
+      
+      // Group unique prefix signatures and trace their respective chunk fragments
+      Map<String, int> uniqueGamesMap = {};
+      Map<String, int> sizeBytesCalculatedMap = {};
+
+      for (var element in contentList) {
+        if (element is File) {
+          String filename = element.path.split('/').last;
+          // Validates matching standard signature: ul.[HASH].[GAMEID].[PART]
+          if (filename.startsWith("ul.") && filename.length > 22) {
+            int lastDotPos = filename.lastIndexOf('.');
+            if (lastDotPos != -1) {
+              String basePrefix = filename.substring(0, lastDotPos); // extracts e.g. ul.5CFE8235.SCUS_971.12
+              String partExtension = filename.substring(lastDotPos + 1);
+              
+              if (RegExp(r'^\d+$').hasMatch(partExtension)) {
+                int partIndex = int.parse(partExtension);
+                int currentMaxParts = uniqueGamesMap[basePrefix] ?? 0;
+                if (partIndex + 1 > currentMaxParts) {
+                  uniqueGamesMap[basePrefix] = partIndex + 1;
+                }
+                
+                // Keep progressive sizes for media flag verification calculations
+                int fileLength = await element.length();
+                sizeBytesCalculatedMap[basePrefix] = (sizeBytesCalculatedMap[basePrefix] ?? 0) + fileLength;
+              }
+            }
+          }
+        }
+      }
+
+      if (uniqueGamesMap.isEmpty) {
+        setState(() { _msg = "COMPLETED: NO LOOSE INDEPENDENT CHUNKED SPLIT FILES IDENTIFIED."; _pct = 0.0; });
+        return;
+      }
+
+      final File cfgFile = File('$targetFolder/ul.cfg');
+      if (await cfgFile.exists()) await cfgFile.delete();
+
+      final BytesBuilder compiledConfigBytes = BytesBuilder();
+      int gameCounter = 0;
+
+      uniqueGamesMap.forEach((basePrefix, totalParts) {
+        final Uint8List singleEntry = Uint8List(64);
+        
+        // Extract game id parameters safely out from "ul.XXXXXXXX.GAME_ID" layout
+        List<String> configurationSegments = basePrefix.split('.');
+        String parsedGameId = "SLUS_202.40"; 
+        if (configurationSegments.length >= 3) {
+          parsedGameId = configurationSegments.sublist(2).join('.'); 
+        }
+
+        // 1. Assign fallback visible text format for PS2 menu selection
+        String generatedDisplayName = "GAME $parsedGameId".toUpperCase();
+        if (generatedDisplayName.length > 32) generatedDisplayName = generatedDisplayName.substring(0, 32);
+        List<int> encodedName = latin1.encode(generatedDisplayName);
+        for (int i = 0; i < 32; i++) {
+          singleEntry[i] = i < encodedName.length ? encodedName[i] : 0x00;
+        }
+
+        // 2. Format unique layout config string index pointer ("ul.GAME_ID")
+        String finalConfigId = "ul.$parsedGameId";
+        if (finalConfigId.length > 15) finalConfigId = finalConfigId.substring(0, 15);
+        List<int> encodedConfigId = latin1.encode(finalConfigId);
+        for (int i = 0; i < 15; i++) {
+          singleEntry[32 + i] = i < encodedConfigId.length ? encodedConfigId[i] : 0x00;
+        }
+
+        // 3. Metadata tracking configurations matching USBUtil binary table schemas
+        singleEntry[47] = totalParts; 
+        int combinedPayloadWeight = sizeBytesCalculatedMap[basePrefix] ?? 0;
+        singleEntry[48] = (combinedPayloadWeight > 734003200) ? 0x14 : 0x12; 
+        
+        for (int i = 49; i <= 52; i++) { singleEntry[i] = 0x00; }
+        singleEntry[53] = 0x08; // USBUtil configuration constant anchor point validation
+        for (int i = 54; i < 64; i++) { singleEntry[i] = 0x00; }
+
+        compiledConfigBytes.add(singleEntry);
+        gameCounter++;
+      });
+
+      await cfgFile.writeAsBytes(compiledConfigBytes.takeBytes(), flush: true);
+      setState(() { _pct = 1.0; _msg = "SUCCESS: REGENERATED MAP INDEX CARD FOR $gameCounter GAMES!"; });
+    } catch (e) {
+      setState(() { _msg = "WRITE ERROR: CONFIG FILE REGENERATION ACCESS CRITICAL FAIL."; _pct = 0.0; });
+    } finally {
+      setState(() { _run = false; });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -450,7 +540,13 @@ class _OplConverterPageState extends State<OplConverterPage> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Row(children: [Icon(Icons.gamepad, color: Colors.grey, size: 16), SizedBox(width: 6), Text("BDM USB LOADER", style: TextStyle(color: Colors.grey, fontSize: 11, fontWeight: FontWeight.bold))]),
+                // REGENERATE ACTION LINK: Scans direct file structure mappings
+                TextButton.icon(
+                  onPressed: _run ? null : _regenerateUlCfg,
+                  icon: const Icon(Icons.refresh, size: 16, color: Color(0xFF00FFCC)),
+                  label: const Text("REGEN REBUILD UL.CFG", style: TextStyle(color: Color(0xFF00FFCC), fontSize: 10, fontWeight: FontWeight.bold)),
+                  style: TextButton.styleFrom(padding: EdgeInsets.zero, minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                ),
                 ElevatedButton.icon(
                   onPressed: _run ? null : _startProcess, icon: const Icon(Icons.folder_open, size: 18), 
                   label: Text(_run ? "PROCESSING" : (_isIsoToUl ? "START CONVERSION" : "LOAD OPL DIRECTORY")),
@@ -459,6 +555,23 @@ class _OplConverterPageState extends State<OplConverterPage> {
               ],
             ),
           ),
+          
+          // ==================== ADVERTISEMENT STRIP AT BOTTOM ====================
+          SafeArea(
+            top: false,
+            child: Container(
+              width: double.infinity,
+              height: 50, 
+              color: const Color(0xFF161E2E), 
+              child: const Center(
+                child: Text(
+                  "ADVERTISEMENT BANNER PLACEHOLDER", 
+                  style: TextStyle(color: Colors.grey, fontSize: 10, letterSpacing: 1.2),
+                ),
+              ),
+            ),
+          ),
+          // =======================================================================
         ],
       ),
     );
