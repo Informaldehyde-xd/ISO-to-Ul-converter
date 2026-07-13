@@ -31,7 +31,7 @@ class OplConverterPage extends StatefulWidget {
 class _OplConverterPageState extends State<OplConverterPage> {
   String _msg = "READY: SELECT A PS2 ISO GAME FILE";
   bool _run = false;
-  bool _isScanningDisk = false; // Tracks the initial file identification scanning step
+  bool _isScanningDisk = false; 
   double _pct = 0.0;
   String _name = "No ISO Loaded";
   bool _isIsoToUl = true; 
@@ -93,27 +93,41 @@ class _OplConverterPageState extends State<OplConverterPage> {
   }
 
   Future<void> _convertIsoToUl() async {
+    setState(() {
+      _isScanningDisk = true;
+      _msg = "OPENING FILE PICKER... SELECT YOUR ISO";
+    });
+    await Future.delayed(Duration.zero);
+
     FilePickerResult? res = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['iso']);
-    if (res == null || res.files.single.path == null) return;
+    
+    if (res == null || res.files.single.path == null) {
+      setState(() {
+        _isScanningDisk = false;
+        _msg = "READY: SELECT A PS2 ISO GAME FILE";
+      });
+      return;
+    }
     
     final File src = File(res.files.single.path!);
     
-    // Switch into scanning animation mode before reading blocks
+    // Crucial: Update state AND force rendering before running the heavy IO scan loops
     setState(() { 
       _name = res.files.single.name.replaceAll('.iso', ''); 
       _isScanningDisk = true;
       _msg = "RUNNING: SCANNING DISK TRACKS FOR GENUINE ID..."; 
     });
+    await Future.delayed(const Duration(milliseconds: 50)); // Yield thread so UI updates immediately
     
     final String gid = await _getGenuineId(src);
     final String hashId = _generateUlHashId(_name);
     final String filePrefix = "ul.$hashId.$gid"; 
     
-    // Pause animation mode to allow selection input choice prompt window
     setState(() { 
       _isScanningDisk = false;
       _msg = "ID FOUND: [$gid]. CHOOSE YOUR OPL ROOT USB DIRECTORY..."; 
     });
+    await Future.delayed(Duration.zero);
     
     String? out = await FilePicker.platform.getDirectoryPath();
     if (out == null) return;
@@ -126,6 +140,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
     }
 
     setState(() { _run = true; _pct = 0.0; _msg = "RUNNING: INITIALIZING HIGH SPEED DATA STREAMS..."; });
+    await Future.delayed(Duration.zero);
     
     try {
       final int len = await src.length();
@@ -224,6 +239,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
       _isScanningDisk = true;
       _msg = "RUNNING: PARSING UL.CFG AND READING LOCAL STORAGE STRUCTURE..."; 
     });
+    await Future.delayed(const Duration(milliseconds: 50));
 
     List<Map<String, dynamic>> structuralGamesList = [];
     try {
@@ -325,6 +341,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
     if (outDir == null) return;
 
     setState(() { _run = true; _pct = 0.0; _msg = "RUNNING: VERIFYING ALL SPLIT CHUNKS IN FOLDER..."; });
+    await Future.delayed(Duration.zero);
 
     try {
       List<File> sequentialParts = [];
@@ -400,6 +417,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
       _pct = 0.0; 
       _msg = "RUNNING: SCANNING STORAGE DIRECTORY FILES..."; 
     });
+    await Future.delayed(const Duration(milliseconds: 50));
 
     try {
       final Directory dir = Directory(targetFolder);
@@ -514,7 +532,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
                     _isIsoToUl = true;
                     _name = "No ISO Loaded";
                     _pct = 0.0;
-                    _msg = "READY: SELECT A PS2 ISO GAME FILE";
+                   _msg = "READY: SELECT A PS2 ISO GAME FILE";
                   });
                 },
                 selectedColor: const Color(0xFF4C9EFF),
@@ -549,7 +567,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
                   Text(_name.toUpperCase(), style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w500), overflow: TextOverflow.ellipsis),
                   const SizedBox(height: 40),
                   
-                  // Swaps dynamic layouts based on whether the disk scan phase is running or if writing bytes
                   ClipRRect(
                     borderRadius: BorderRadius.circular(4), 
                     child: _isScanningDisk
