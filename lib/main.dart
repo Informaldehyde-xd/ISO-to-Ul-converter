@@ -31,6 +31,7 @@ class OplConverterPage extends StatefulWidget {
 class _OplConverterPageState extends State<OplConverterPage> {
   String _msg = "READY: SELECT A PS2 ISO GAME FILE";
   bool _run = false;
+  bool _isScanningDisk = false; // Tracks the initial file identification scanning step
   double _pct = 0.0;
   String _name = "No ISO Loaded";
   bool _isIsoToUl = true; 
@@ -91,19 +92,28 @@ class _OplConverterPageState extends State<OplConverterPage> {
     }
   }
 
-  // UNTOUCHED: Kept exactly as requested
   Future<void> _convertIsoToUl() async {
     FilePickerResult? res = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['iso']);
     if (res == null || res.files.single.path == null) return;
     
     final File src = File(res.files.single.path!);
-    setState(() { _name = res.files.single.name.replaceAll('.iso', ''); _msg = "SCANNING DISK TRACKS FOR GENUINE ID..."; });
+    
+    // Switch into scanning animation mode before reading blocks
+    setState(() { 
+      _name = res.files.single.name.replaceAll('.iso', ''); 
+      _isScanningDisk = true;
+      _msg = "RUNNING: SCANNING DISK TRACKS FOR GENUINE ID..."; 
+    });
     
     final String gid = await _getGenuineId(src);
     final String hashId = _generateUlHashId(_name);
     final String filePrefix = "ul.$hashId.$gid"; 
     
-    setState(() { _msg = "ID FOUND: [$gid]. CHOOSE YOUR OPL ROOT USB DIRECTORY..."; });
+    // Pause animation mode to allow selection input choice prompt window
+    setState(() { 
+      _isScanningDisk = false;
+      _msg = "ID FOUND: [$gid]. CHOOSE YOUR OPL ROOT USB DIRECTORY..."; 
+    });
     
     String? out = await FilePicker.platform.getDirectoryPath();
     if (out == null) return;
@@ -115,7 +125,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
       return;
     }
 
-    setState(() { _run = true; _pct = 0.0; _msg = "INITIALIZING HIGH SPEED DATA STREAMS..."; });
+    setState(() { _run = true; _pct = 0.0; _msg = "RUNNING: INITIALIZING HIGH SPEED DATA STREAMS..."; });
     
     try {
       final int len = await src.length();
@@ -148,7 +158,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
           currentPartBytesWritten += bytesToRead;
 
           if (done % (16 * 1024 * 1024) == 0 || done == len) {
-            setState(() { _msg = "WRITING: $filePrefix.$partLabel"; _pct = done / len; });
+            setState(() { _msg = "RUNNING: SPLITTING ISO ➔ WRITING $filePrefix.$partLabel"; _pct = done / len; });
             await Future.delayed(const Duration(milliseconds: 1)); 
           }
         }
@@ -157,7 +167,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
       }
       await reader.close();
 
-      setState(() { _msg = "COMPILING FILE MAP INDEX CARD FOR MENU UPGRADE..."; });
+      setState(() { _msg = "RUNNING: COMPILING FILE MAP INDEX CARD FOR MENU UPGRADE..."; });
       
       final Uint8List newGameEntryBytes = Uint8List(64);
       
@@ -198,7 +208,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
     } finally { setState(() { _run = false; }); }
   }
 
-  // UNTOUCHED: Kept exactly as requested
   Future<void> _convertUlToIso() async {
     setState(() { _msg = "SELECT THE OPL FOLDER CONTAINING YOUR UL FILES..."; });
     String? srcDir = await FilePicker.platform.getDirectoryPath();
@@ -209,6 +218,12 @@ class _OplConverterPageState extends State<OplConverterPage> {
       setState(() { _msg = "HALTED: ul.cfg NOT FOUND IN SELECTED FOLDER!"; });
       return;
     }
+
+    setState(() { 
+      _run = true; 
+      _isScanningDisk = true;
+      _msg = "RUNNING: PARSING UL.CFG AND READING LOCAL STORAGE STRUCTURE..."; 
+    });
 
     List<Map<String, dynamic>> structuralGamesList = [];
     try {
@@ -251,6 +266,11 @@ class _OplConverterPageState extends State<OplConverterPage> {
         }
       }
     } catch (_) {}
+
+    setState(() { 
+      _run = false; 
+      _isScanningDisk = false;
+    });
 
     if (structuralGamesList.isEmpty) {
       setState(() { _msg = "HALTED: NO MATCHING UL SPLIT FILES RECOGNIZED IN THIS FOLDER."; });
@@ -304,7 +324,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
     String? outDir = await FilePicker.platform.getDirectoryPath();
     if (outDir == null) return;
 
-    setState(() { _run = true; _pct = 0.0; _msg = "VERIFYING ALL SPLIT CHUNKS IN FOLDER..."; });
+    setState(() { _run = true; _pct = 0.0; _msg = "RUNNING: VERIFYING ALL SPLIT CHUNKS IN FOLDER..."; });
 
     try {
       List<File> sequentialParts = [];
@@ -351,7 +371,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
 
           if (integratedBytes % (16 * 1024 * 1024) == 0 || integratedBytes == totalTargetSize) {
             setState(() { 
-              _msg = "REASSEMBLING IMAGE DATA: $segmentName"; 
+              _msg = "RUNNING: REASSEMBLING ISO ➔ READ/WRITE: $segmentName"; 
               _pct = integratedBytes / totalTargetSize; 
             });
             await Future.delayed(const Duration(milliseconds: 1));
@@ -369,30 +389,32 @@ class _OplConverterPageState extends State<OplConverterPage> {
     }
   }
 
-  // NEW METHOD: Scans the folder and completely generates/rebuilds the ul.cfg structural file map
   Future<void> _regenerateUlCfg() async {
     setState(() { _msg = "SELECT OPL ROUTE DIRECTORY TO SCAN SPLIT CONVERTED GAME CHUNKS..."; });
     String? targetFolder = await FilePicker.platform.getDirectoryPath();
     if (targetFolder == null) return;
 
-    setState(() { _run = true; _pct = 0.0; _msg = "SCANNING DIRECTORY TREE ELEMENTS..."; });
+    setState(() { 
+      _run = true; 
+      _isScanningDisk = true;
+      _pct = 0.0; 
+      _msg = "RUNNING: SCANNING STORAGE DIRECTORY FILES..."; 
+    });
 
     try {
       final Directory dir = Directory(targetFolder);
       final List<FileSystemEntity> contentList = await dir.list().toList();
       
-      // Group unique prefix signatures and trace their respective chunk fragments
       Map<String, int> uniqueGamesMap = {};
       Map<String, int> sizeBytesCalculatedMap = {};
 
       for (var element in contentList) {
         if (element is File) {
           String filename = element.path.split('/').last;
-          // Validates matching standard signature: ul.[HASH].[GAMEID].[PART]
           if (filename.startsWith("ul.") && filename.length > 22) {
             int lastDotPos = filename.lastIndexOf('.');
             if (lastDotPos != -1) {
-              String basePrefix = filename.substring(0, lastDotPos); // extracts e.g. ul.5CFE8235.SCUS_971.12
+              String basePrefix = filename.substring(0, lastDotPos); 
               String partExtension = filename.substring(lastDotPos + 1);
               
               if (RegExp(r'^\d+$').hasMatch(partExtension)) {
@@ -402,7 +424,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
                   uniqueGamesMap[basePrefix] = partIndex + 1;
                 }
                 
-                // Keep progressive sizes for media flag verification calculations
                 int fileLength = await element.length();
                 sizeBytesCalculatedMap[basePrefix] = (sizeBytesCalculatedMap[basePrefix] ?? 0) + fileLength;
               }
@@ -412,9 +433,15 @@ class _OplConverterPageState extends State<OplConverterPage> {
       }
 
       if (uniqueGamesMap.isEmpty) {
-        setState(() { _msg = "COMPLETED: NO LOOSE INDEPENDENT CHUNKED SPLIT FILES IDENTIFIED."; _pct = 0.0; });
+        setState(() { 
+          _isScanningDisk = false;
+          _msg = "COMPLETED: NO LOOSE INDEPENDENT CHUNKED SPLIT FILES IDENTIFIED."; 
+          _pct = 0.0; 
+        });
         return;
       }
+
+      setState(() { _msg = "RUNNING: WRITING STRUCTURAL ENTRIES INTO NEW UL.CFG..."; });
 
       final File cfgFile = File('$targetFolder/ul.cfg');
       if (await cfgFile.exists()) await cfgFile.delete();
@@ -425,14 +452,12 @@ class _OplConverterPageState extends State<OplConverterPage> {
       uniqueGamesMap.forEach((basePrefix, totalParts) {
         final Uint8List singleEntry = Uint8List(64);
         
-        // Extract game id parameters safely out from "ul.XXXXXXXX.GAME_ID" layout
         List<String> configurationSegments = basePrefix.split('.');
         String parsedGameId = "SLUS_202.40"; 
         if (configurationSegments.length >= 3) {
           parsedGameId = configurationSegments.sublist(2).join('.'); 
         }
 
-        // 1. Assign fallback visible text format for PS2 menu selection
         String generatedDisplayName = "GAME $parsedGameId".toUpperCase();
         if (generatedDisplayName.length > 32) generatedDisplayName = generatedDisplayName.substring(0, 32);
         List<int> encodedName = latin1.encode(generatedDisplayName);
@@ -440,7 +465,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
           singleEntry[i] = i < encodedName.length ? encodedName[i] : 0x00;
         }
 
-        // 2. Format unique layout config string index pointer ("ul.GAME_ID")
         String finalConfigId = "ul.$parsedGameId";
         if (finalConfigId.length > 15) finalConfigId = finalConfigId.substring(0, 15);
         List<int> encodedConfigId = latin1.encode(finalConfigId);
@@ -448,13 +472,12 @@ class _OplConverterPageState extends State<OplConverterPage> {
           singleEntry[32 + i] = i < encodedConfigId.length ? encodedConfigId[i] : 0x00;
         }
 
-        // 3. Metadata tracking configurations matching USBUtil binary table schemas
         singleEntry[47] = totalParts; 
         int combinedPayloadWeight = sizeBytesCalculatedMap[basePrefix] ?? 0;
         singleEntry[48] = (combinedPayloadWeight > 734003200) ? 0x14 : 0x12; 
         
         for (int i = 49; i <= 52; i++) { singleEntry[i] = 0x00; }
-        singleEntry[53] = 0x08; // USBUtil configuration constant anchor point validation
+        singleEntry[53] = 0x08; 
         for (int i = 54; i < 64; i++) { singleEntry[i] = 0x00; }
 
         compiledConfigBytes.add(singleEntry);
@@ -466,7 +489,10 @@ class _OplConverterPageState extends State<OplConverterPage> {
     } catch (e) {
       setState(() { _msg = "WRITE ERROR: CONFIG FILE REGENERATION ACCESS CRITICAL FAIL."; _pct = 0.0; });
     } finally {
-      setState(() { _run = false; });
+      setState(() { 
+        _run = false; 
+        _isScanningDisk = false;
+      });
     }
   }
 
@@ -483,7 +509,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
               ChoiceChip(
                 label: const Text("ISO ➔ UL CONVERTER"),
                 selected: _isIsoToUl,
-                onSelected: _run ? null : (selected) {
+                onSelected: _run || _isScanningDisk ? null : (selected) {
                   setState(() {
                     _isIsoToUl = true;
                     _name = "No ISO Loaded";
@@ -498,7 +524,7 @@ class _OplConverterPageState extends State<OplConverterPage> {
               ChoiceChip(
                 label: const Text("UL ➔ ISO REASSEMBLER"),
                 selected: !_isIsoToUl,
-                onSelected: _run ? null : (selected) {
+                onSelected: _run || _isScanningDisk ? null : (selected) {
                   setState(() {
                     _isIsoToUl = false;
                     _name = "No OPL Folder Loaded";
@@ -522,13 +548,32 @@ class _OplConverterPageState extends State<OplConverterPage> {
                   const SizedBox(height: 6),
                   Text(_name.toUpperCase(), style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w500), overflow: TextOverflow.ellipsis),
                   const SizedBox(height: 40),
-                  ClipRRect(borderRadius: BorderRadius.circular(4), child: LinearProgressIndicator(value: _pct, minHeight: 12, backgroundColor: const Color(0xFF1A2333), valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF4C9EFF)))),
+                  
+                  // Swaps dynamic layouts based on whether the disk scan phase is running or if writing bytes
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4), 
+                    child: _isScanningDisk
+                        ? const LinearProgressIndicator(
+                            minHeight: 12,
+                            backgroundColor: Color(0xFF1A2333),
+                            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF00FFCC)),
+                          )
+                        : LinearProgressIndicator(
+                            value: _pct, 
+                            minHeight: 12, 
+                            backgroundColor: const Color(0xFF1A2333), 
+                            valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF4C9EFF)),
+                          ),
+                  ),
                   const SizedBox(height: 12),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Expanded(child: Text(_msg, style: const TextStyle(color: Color(0xFF00FFCC), fontSize: 11, fontFamily: 'monospace'), overflow: TextOverflow.ellipsis, maxLines: 2)),
-                      Text("${(_pct * 100).toStringAsFixed(0)}%", style: const TextStyle(color: Color(0xFF4C9EFF), fontSize: 16, fontWeight: FontWeight.bold)),
+                      Text(
+                        _isScanningDisk ? "SCAN" : "${(_pct * 100).toStringAsFixed(0)}%", 
+                        style: TextStyle(color: _isScanningDisk ? const Color(0xFF00FFCC) : const Color(0xFF4C9EFF), fontSize: 16, fontWeight: FontWeight.bold),
+                      ),
                     ],
                   ),
                 ],
@@ -540,23 +585,21 @@ class _OplConverterPageState extends State<OplConverterPage> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                // REGENERATE ACTION LINK: Scans direct file structure mappings
                 TextButton.icon(
-                  onPressed: _run ? null : _regenerateUlCfg,
+                  onPressed: _run || _isScanningDisk ? null : _regenerateUlCfg,
                   icon: const Icon(Icons.refresh, size: 16, color: Color(0xFF00FFCC)),
                   label: const Text("REGEN REBUILD UL.CFG", style: TextStyle(color: Color(0xFF00FFCC), fontSize: 10, fontWeight: FontWeight.bold)),
                   style: TextButton.styleFrom(padding: EdgeInsets.zero, minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
                 ),
                 ElevatedButton.icon(
-                  onPressed: _run ? null : _startProcess, icon: const Icon(Icons.folder_open, size: 18), 
-                  label: Text(_run ? "PROCESSING" : (_isIsoToUl ? "START CONVERSION" : "LOAD OPL DIRECTORY")),
+                  onPressed: _run || _isScanningDisk ? null : _startProcess, icon: const Icon(Icons.folder_open, size: 18), 
+                  label: Text(_run || _isScanningDisk ? "PROCESSING" : (_isIsoToUl ? "START CONVERSION" : "LOAD OPL DIRECTORY")),
                   style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF4C9EFF), foregroundColor: Colors.black, disabledBackgroundColor: const Color(0xFF1E293B), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12)),
                 ),
               ],
             ),
           ),
           
-          // ==================== ADVERTISEMENT STRIP AT BOTTOM ====================
           SafeArea(
             top: false,
             child: Container(
@@ -571,7 +614,6 @@ class _OplConverterPageState extends State<OplConverterPage> {
               ),
             ),
           ),
-          // =======================================================================
         ],
       ),
     );
